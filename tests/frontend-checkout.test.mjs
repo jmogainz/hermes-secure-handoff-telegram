@@ -33,6 +33,7 @@ const checkout = {
     { id: 'f2', label: 'Card number', type: 'card_number', required: true, autocomplete: 'cc-number', inputMode: 'numeric' },
     { id: 'f3', label: 'Expiration date', type: 'card_expiry', required: true, autocomplete: 'cc-exp', inputMode: 'numeric' },
     { id: 'f4', label: 'Security code', type: 'cvc', required: true, autocomplete: 'cc-csc', inputMode: 'numeric' },
+    { id: 'f5', label: 'Country', type: 'select', required: true, options: [{ value: '', label: 'Choose a country' }, { value: 'US', label: 'United States' }] },
   ],
 };
 
@@ -92,6 +93,7 @@ try {
   assert.equal(await page.locator('#field-f2').getAttribute('autocomplete'), 'cc-number');
   assert.equal(await page.locator('#field-f2').getAttribute('inputmode'), 'numeric');
   assert.equal(await page.locator('#field-f4').getAttribute('autocomplete'), 'cc-csc');
+  assert.equal(await page.locator('#field-f5').locator('option').count(), 2);
   assert.equal(await page.getByRole('button', { name: 'Review purchase' }).count(), 1);
 
   await page.locator('#field-f0').fill('Synthetic User');
@@ -99,6 +101,7 @@ try {
   await page.locator('#field-f2').fill('synthetic-card-number');
   await page.locator('#field-f3').fill('synthetic-expiry');
   await page.locator('#field-f4').fill('synthetic-cvc');
+  await page.locator('#field-f5').selectOption('US');
   await page.getByRole('button', { name: 'Review purchase' }).click();
   await page.waitForFunction(() => typeof window.__sent === 'string');
   assert.deepEqual(await decryptEnvelope(await page.evaluate(() => window.__sent), checkout.id), {
@@ -108,6 +111,7 @@ try {
       f2: 'synthetic-card-number',
       f3: 'synthetic-expiry',
       f4: 'synthetic-cvc',
+      f5: 'US',
     },
   });
   assert.equal(await page.locator('#field-f2').inputValue(), '');
@@ -119,7 +123,7 @@ try {
   await page.getByRole('button', { name: 'Authorize purchase' }).click();
   await page.waitForFunction(() => typeof window.__sent === 'string');
   assert.deepEqual(await decryptEnvelope(await page.evaluate(() => window.__sent), confirmation.id), { confirm: true });
-  console.log('frontend v3 checkout/confirmation test: PASS');
+  console.log('frontend checkout browser test: PASS');
 } finally {
   await browser.close();
   await new Promise(resolveServer => server.close(resolveServer));

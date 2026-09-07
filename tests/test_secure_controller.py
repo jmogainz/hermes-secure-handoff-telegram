@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from playwright.async_api import async_playwright
 
-from plugin.browser_login import BrowserController
+from plugin.secure_handoff import SecureHandoffController
 from plugin.demo_site import start_demo
 
 
@@ -37,7 +37,7 @@ async def disposable_controller(tmp_path):
         headless=True,
     )
     context = await browser.new_context(ignore_https_errors=True)
-    return BrowserController(Ctx(tmp_path), browser=browser, playwright=playwright, context=context, owns_browser=True)
+    return SecureHandoffController(Ctx(tmp_path), browser=browser, playwright=playwright, context=context, owns_browser=True)
 
 
 @pytest.mark.asyncio
@@ -69,7 +69,7 @@ async def test_bind_stage_supports_generic_checkout_fields_and_payment_action(tm
         assert session.ref_meta["f2"]["label"] == "Card number"
         assert "submit" in session.refs
         result = await controller._present(session, SimpleNamespace(bot=None))
-        assert result["status"] == "waiting_for_login"
+        assert result["status"] == "waiting_for_handoff"
         assert session.request["v"] == 3
         assert session.request["mode"] == "checkout"
         assert session.request["fields"][2]["type"] == "card_number"

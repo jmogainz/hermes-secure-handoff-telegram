@@ -120,7 +120,7 @@ async function main() {
     await assertNoOverflow(page, 1440, 900);
     await assertNoOverflow(page, 768, 1024);
     await assertNoOverflow(page, 390, 844);
-    assert.equal(await page.locator('input, textarea, select').count(), 0, 'credential controls must not exist before a V2 request');
+    assert.equal(await page.locator('input, textarea, select').count(), 0, 'secure controls must not exist before a request');
     assert.equal(await page.locator('#credential-form').count(), 1, 'semantic empty form wrapper should exist');
     assert.match(await page.locator('#status-kicker').textContent(), /Ready to verify/);
     assert.match(await page.getByRole('button', { name: 'Send the connection test' }).textContent(), /Send test/);

@@ -42,7 +42,7 @@ PLUGIN_HANDLER_GROUP = -100
 _MAX_LAUNCH_URL_CHARS = 4096
 _MAX_PARSE_BYTES = 64 * 1024
 _BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_RECEIPT_FILENAME = "logincheck_receipts.jsonl"
+_RECEIPT_FILENAME = "connection_check_receipts.jsonl"
 
 
 @dataclass(frozen=True)
@@ -316,7 +316,7 @@ class ReceiptStore:
 class OwnedWebAppDataFilter:
     """Matcher used to build a PTB MessageFilter at connect time."""
 
-    def __init__(self, owner: "TelegramLoginPlugin"):
+    def __init__(self, owner: "TelegramSecureHandoffPlugin"):
         self._owner = owner
 
     def filter(self, message: Any) -> bool:
@@ -325,14 +325,14 @@ class OwnedWebAppDataFilter:
         return request_id is not None and self._owner.owns_request_id(request_id)
 
 
-def _make_ptb_owned_filter(owner: "TelegramLoginPlugin", filters_module: Any) -> Any:
+def _make_ptb_owned_filter(owner: "TelegramSecureHandoffPlugin", filters_module: Any) -> Any:
     """Create a real PTB MessageFilter without importing PTB at discovery."""
 
     matcher = OwnedWebAppDataFilter(owner)
 
     class _PTBOwnedWebAppDataFilter(filters_module.MessageFilter):
         def __init__(self) -> None:
-            super().__init__(name="telegram-login-mvp-owned-web-app-data")
+            super().__init__(name="telegram-secure-handoff-owned-web-app-data")
 
         def filter(self, message: Any) -> bool:
             return matcher.filter(message)
@@ -340,7 +340,7 @@ def _make_ptb_owned_filter(owner: "TelegramLoginPlugin", filters_module: Any) ->
     return _PTBOwnedWebAppDataFilter()
 
 
-class TelegramLoginPlugin:
+class TelegramSecureHandoffPlugin:
     """The stateful connection-test implementation."""
 
     def __init__(
@@ -510,7 +510,7 @@ class TelegramLoginPlugin:
     def _status_text(self, status: str) -> str:
         return {
             "success": "Connection test succeeded.",
-            "expired": "Connection test expired. Start a new test with /logincheck.",
+            "expired": "Connection test expired. Start a new test with /handoffcheck.",
             "replay": "Connection test already used.",
             "invalid": "Connection test rejected.",
             "rejected": "Connection test rejected.",
@@ -700,7 +700,7 @@ class TelegramLoginPlugin:
 
         return ReplyKeyboardRemove()
 
-    async def handle_logincheck(self, update: Any, context: Any) -> None:
+    async def handle_handoffcheck(self, update: Any, context: Any) -> None:
         identity = self._authorized_command_identity(update)
         if identity is None:
             return
@@ -711,13 +711,13 @@ class TelegramLoginPlugin:
         if result.status == "created" and result.request is not None:
             text = (
                 "Connection test — no passwords. Open the button below, "
-                "then tap Send test. Cancel with /logincancel."
+                "then tap Send test. Cancel with /handoffcancel."
             )
             markup = self._keyboard(result.request.launch_url)
         elif result.status == "existing" and result.request is not None:
             text = (
                 "A connection test is already pending. Use the existing "
-                "button, or cancel with /logincancel."
+                "button, or cancel with /handoffcancel."
             )
             markup = self._keyboard(result.request.launch_url)
         elif result.status == "cap":
@@ -735,7 +735,7 @@ class TelegramLoginPlugin:
         )
         self._raise_stop()
 
-    async def handle_logincancel(self, update: Any, context: Any) -> None:
+    async def handle_handoffcancel(self, update: Any, context: Any) -> None:
         identity = self._authorized_command_identity(update)
         if identity is None:
             return
@@ -781,8 +781,8 @@ class TelegramLoginPlugin:
         )
         application.add_handler(
             CommandHandler(
-                "logincheck",
-                self.handle_logincheck,
+                "handoffcheck",
+                self.handle_handoffcheck,
                 filters=owner_scope,
                 block=True,
             ),
@@ -790,8 +790,8 @@ class TelegramLoginPlugin:
         )
         application.add_handler(
             CommandHandler(
-                "logincancel",
-                self.handle_logincancel,
+                "handoffcancel",
+                self.handle_handoffcancel,
                 filters=owner_scope,
                 block=True,
             ),
@@ -817,10 +817,10 @@ def register(ctx: Any) -> None:
     config = load_runtime_config(ctx)
     if config is None:
         logger.warning(
-            "telegram-browser-login connection test disabled: missing or invalid mini_app_url/allowed_user_ids"
+            "Hermes Secure Handoff Telegram connection test disabled: missing or invalid mini_app_url/allowed_user_ids"
         )
         return
-    ctx.register_telegram_handler(TelegramLoginPlugin(config, ctx).wire)
+    ctx.register_telegram_handler(TelegramSecureHandoffPlugin(config, ctx).wire)
 
 
 __all__ = [
@@ -832,7 +832,7 @@ __all__ = [
     "REQUEST_VERSION",
     "RSA_KEY_SIZE",
     "RuntimeConfig",
-    "TelegramLoginPlugin",
+    "TelegramSecureHandoffPlugin",
     "load_runtime_config",
     "register",
 ]

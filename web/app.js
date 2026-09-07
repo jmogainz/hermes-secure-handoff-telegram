@@ -21,7 +21,7 @@
     privacyNote: document.querySelector('#privacy-note'),
     sendButton: document.querySelector('#send-button'),
     secondary: document.querySelector('#secondary-message'),
-    details: document.querySelector('#v2-details'),
+    details: document.querySelector('#secure-details'),
     form: document.querySelector('#credential-form'),
     origin: document.querySelector('#request-origin'),
     fields: document.querySelector('#field-list'),
@@ -125,12 +125,12 @@
       title: 'This Telegram view is unsupported',
       message: 'Open the connection test using the Telegram keyboard button on an up-to-date Telegram app.',
     },
-    v2Ready: {
+    secureReady: {
       kicker: 'Ready to submit',
-      title: 'Enter credentials',
-      message: 'Entries are encrypted locally before transmission.',
+      title: 'Enter secure details',
+      message: 'Use the iOS keyboard or Passwords suggestions when available. Entries are encrypted locally before transmission.',
     },
-    v2Sending: {
+    secureSending: {
       kicker: 'Submitting…',
       title: 'Sending encrypted details',
       message: 'Telegram is sending the encrypted submission to the browser.',
@@ -148,16 +148,16 @@
     let view = views[viewName];
     if (!view) return;
 
-    if (viewName === 'v2Ready') {
+    if (viewName === 'secureReady') {
       const stageInfo = resolveStageCopy(state.request?.stage);
       view = { ...view, ...stageInfo };
     }
 
     const isError = ['missing', 'outside', 'expired', 'invalid', 'unsupported'].includes(viewName);
     const isRetry = viewName === 'sendFailed';
-    const isSending = viewName === 'sending' || viewName === 'v2Sending';
-    const isSecure = state.version === 2 || state.version === 3;
-    const showButton = viewName === 'ready' || isRetry || viewName === 'v2Ready';
+    const isSending = viewName === 'sending' || viewName === 'secureSending';
+    const isSecure = state.version === 3;
+    const showButton = viewName === 'ready' || isRetry || viewName === 'secureReady';
 
     dom.card.dataset.state = isError ? 'error' : isRetry ? 'send-failed' : viewName;
     if (dom.kicker) dom.kicker.textContent = view.kicker;
@@ -181,7 +181,7 @@
       : (isRetry ? 'Try the connection test again' : isSending ? 'Sending the connection test' : 'Send the connection test'));
     if (dom.privacyNote) {
       dom.privacyNote.setAttribute('data-state', isError || isRetry ? 'error' : 'default');
-      if (isSecure && viewName === 'v2Ready') {
+      if (isSecure && viewName === 'secureReady') {
         dom.privacyNote.textContent = state.request?.mode === 'payment_confirmation'
           ? 'Confirm only after reviewing the live browser page.'
           : 'Encrypted locally in this page. Telegram receives only the encrypted submission.';
@@ -290,7 +290,7 @@
       throw new RequestError('invalid');
     }
 
-    if (!request || typeof request !== 'object' || Array.isArray(request) || ![1, 2, 3].includes(request.v)) {
+    if (!request || typeof request !== 'object' || Array.isArray(request) || ![1, 3].includes(request.v)) {
       throw new RequestError('invalid');
     }
 
@@ -311,26 +311,8 @@
     }
 
     validatePublicJwk(request.publicKey);
-    if (request.v === 2) validateV2Request(request);
     if (request.v === 3) validateV3Request(request);
     return request;
-  }
-
-  function validateV2Request(request) {
-    let origin;
-    try { origin = new URL(request.origin); } catch { throw new RequestError('invalid'); }
-    if (origin.protocol !== 'https:' || origin.origin !== request.origin || origin.username || origin.password || origin.search || origin.hash) throw new RequestError('invalid');
-    if (!Array.isArray(request.fields) || request.fields.length < 1 || request.fields.length > 4) throw new RequestError('invalid');
-    if (request.stage !== undefined && (typeof request.stage !== 'string' || !ID_PATTERN.test(request.stage))) throw new RequestError('invalid');
-    if (request.provider !== undefined && (typeof request.provider !== 'string' || !ID_PATTERN.test(request.provider))) throw new RequestError('invalid');
-    const ids = new Set();
-    for (const field of request.fields) {
-      if (!field || typeof field !== 'object' || typeof field.id !== 'string' || !ID_PATTERN.test(field.id) || ids.has(field.id)) throw new RequestError('invalid');
-      if (typeof field.label !== 'string' || !field.label.trim() || field.label.length > 80 || !['text', 'password', 'otp'].includes(field.type)) throw new RequestError('invalid');
-      if (typeof field.required !== 'boolean') throw new RequestError('invalid');
-      ids.add(field.id);
-    }
-    if (typeof request.demo !== 'boolean') throw new RequestError('invalid');
   }
 
   function validateV3Request(request) {
@@ -345,7 +327,7 @@
     if (request.provider !== undefined && (typeof request.provider !== 'string' || !ID_PATTERN.test(request.provider))) throw new RequestError('invalid');
     const ids = new Set();
     const fieldIdPattern = /^f(?:[0-9]|1[0-9]|2[0-3])$/;
-    const safeOption = value => typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\x00-\x1f]/.test(value);
+    const safeOption = value => typeof value === 'string' && value.length <= 128 && !/[\x00-\x1f]/.test(value);
     for (const field of request.fields) {
       if (!field || typeof field !== 'object' || typeof field.id !== 'string' || !fieldIdPattern.test(field.id) || ids.has(field.id)) throw new RequestError('invalid');
       if (typeof field.label !== 'string' || !field.label.trim() || field.label.length > 80 || /[\x00-\x1f]/.test(field.label) || !FIELD_TYPES.has(field.type)) throw new RequestError('invalid');
@@ -355,7 +337,7 @@
       if (field.type === 'select') {
         if (!Array.isArray(field.options) || field.options.length < 1 || field.options.length > 64) throw new RequestError('invalid');
         for (const option of field.options) {
-          if (!option || typeof option !== 'object' || Object.keys(option).length !== 2 || !safeOption(option.value) || !safeOption(option.label)) throw new RequestError('invalid');
+          if (!option || typeof option !== 'object' || Object.keys(option).length !== 2 || !safeOption(option.value) || !safeOption(option.label) || !option.label.trim()) throw new RequestError('invalid');
         }
       } else if (field.options !== undefined) {
         throw new RequestError('invalid');
@@ -365,7 +347,7 @@
     if (typeof request.demo !== 'boolean') throw new RequestError('invalid');
   }
 
-  function defaultFieldAttributes(field) {
+  function defaultFieldAttributes(field, request) {
     const defaults = {
       text: { name: 'username', autocomplete: 'off', inputMode: 'text', type: 'text', enterKeyHint: 'next' },
       email: { name: 'email', autocomplete: 'email', inputMode: 'email', type: 'email', enterKeyHint: 'next' },
@@ -377,10 +359,13 @@
       card_expiry: { name: 'cc-exp', autocomplete: 'cc-exp', inputMode: 'numeric', type: 'text', enterKeyHint: 'next' },
       cvc: { name: 'csc', autocomplete: 'cc-csc', inputMode: 'numeric', type: 'password', enterKeyHint: 'done' },
     };
+    if (field.type === 'text' && request?.mode === 'auth' && request.stage === 'identifier') {
+      return { ...defaults.text, name: 'username', autocomplete: 'username' };
+    }
     return defaults[field.type] || defaults.text;
   }
 
-  function renderV2Fields(request) {
+  function renderSecureFields(request) {
     dom.origin.textContent = request.origin;
     dom.fields.replaceChildren();
     if (request.v === 3 && request.mode === 'payment_confirmation') return;
@@ -391,7 +376,7 @@
       const select = field.type === 'select';
       const input = document.createElement(select ? 'select' : 'input');
       input.id = `field-${field.id}`;
-      input.name = field.type === 'select' ? field.id : defaultFieldAttributes(field).name;
+      input.name = field.type === 'select' ? field.id : defaultFieldAttributes(field, request).name;
       input.setAttribute('aria-label', field.label);
       input.required = field.required;
       input.dataset.fieldType = field.type;
@@ -403,7 +388,7 @@
           input.appendChild(element);
         }
       } else {
-        const attributes = defaultFieldAttributes(field);
+        const attributes = defaultFieldAttributes(field, request);
         input.type = attributes.type;
         input.maxLength = 512;
         input.autocomplete = field.autocomplete || attributes.autocomplete;
@@ -466,7 +451,7 @@
   async function sendTest() {
     if (state.sending || !state.request || !state.publicKey || !state.telegram) return;
 
-    if (state.version === 2 || state.version === 3) return sendSecure();
+    if (state.version === 3) return sendSecure();
     state.sending = true;
     render('sending');
 
@@ -518,7 +503,7 @@
         values[field.id] = value;
       }
     }
-    state.sending = true; render('v2Sending');
+    state.sending = true; render('secureSending');
     let plainBytes;
     let rawKeyBytes;
     try {
@@ -568,7 +553,7 @@
       state.version = request.v;
       state.publicKey = publicKey;
       state.telegram = telegram;
-      if (request.v === 2 || request.v === 3) { renderV2Fields(request); render('v2Ready'); }
+      if (request.v === 3) { renderSecureFields(request); render('secureReady'); }
       else render('ready');
       if (typeof telegram.ready === 'function') telegram.ready();
     } catch (error) {
@@ -581,7 +566,7 @@
     void sendTest();
   });
   window.addEventListener('pagehide', () => {
-    if (state.request && (state.version === 2 || state.version === 3)) for (const field of state.request.fields) { const input = document.getElementById(`field-${field.id}`); if (input) input.value = ''; }
+    if (state.request && state.version === 3) for (const field of state.request.fields) { const input = document.getElementById(`field-${field.id}`); if (input) input.value = ''; }
   });
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot, { once: true });

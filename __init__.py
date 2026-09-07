@@ -1,6 +1,6 @@
 """Directory-install compatibility entry point for Hermes.
 
-Pip installs expose the namespaced ``hermes_telegram_browser_login`` package;
+Pip installs expose the namespaced ``hermes_telegram_secure_handoff`` package;
 Git-based directory installs load this repository root directly.
 """
 

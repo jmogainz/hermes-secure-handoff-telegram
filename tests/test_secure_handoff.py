@@ -10,13 +10,13 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from playwright.async_api import async_playwright
 
-import plugin.browser_login as browser_login
+import plugin.secure_handoff as secure_handoff
 from plugin.handoff_adapters import BrowserAdapter
-from plugin.browser_login import BrowserController, decrypt_submission, make_request
+from plugin.secure_handoff import SecureHandoffController, decrypt_submission, make_request
 from plugin.demo_site import AUTHENTICATED_MARKER, start_demo
 
 
-def test_v2_hybrid_roundtrip():
+def test_secure_handoff_hybrid_roundtrip():
     fields = [{"id": "f0", "label": "Username or email", "type": "text", "required": True}]
     req, key = make_request("https://demo.example", fields, True)
     aes = b"x" * 32
@@ -32,7 +32,7 @@ def test_v2_hybrid_roundtrip():
     )
     raw = json.dumps(
         {
-            "v": 2,
+            "v": 3,
             "id": req["id"],
             "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
             "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),
@@ -44,14 +44,14 @@ def test_v2_hybrid_roundtrip():
     assert decrypt_submission(raw, req, key) == {"f0": "demo"}
 
 
-def test_v2_rejects_missing_required():
+def test_secure_handoff_rejects_missing_required():
     req, key = make_request(
         "https://demo.example",
         [{"id": "f0", "label": "Password", "type": "password", "required": True}],
     )
     with pytest.raises(ValueError):
         decrypt_submission(
-            json.dumps({"v": 2, "id": req["id"], "wrappedKey": "x", "iv": "x", "ciphertext": "x"}),
+            json.dumps({"v": 3, "id": req["id"], "wrappedKey": "x", "iv": "x", "ciphertext": "x"}),
             req,
             key,
         )
@@ -83,7 +83,7 @@ async def disposable_controller(tmp_path):
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(channel=os.environ.get("PLAYWRIGHT_CHANNEL", "chrome"), headless=True)
     context = await browser.new_context(ignore_https_errors=True)
-    return BrowserController(
+    return SecureHandoffController(
         Ctx(tmp_path),
         browser=browser,
         playwright=playwright,
@@ -105,7 +105,7 @@ async def test_real_chrome_encrypted_submit_reuses_demo_context_and_rejects_repl
             {"url": site.login_url, "demo": True},
             identity,
         )
-        assert result["status"] == "waiting_for_login"
+        assert result["status"] == "waiting_for_handoff"
         session = controller.sessions[identity]
         session.site = site
         assert controller.bot.sent[-1]["reply_markup"]
@@ -125,7 +125,7 @@ async def test_real_chrome_encrypted_submit_reuses_demo_context_and_rejects_repl
         )
         raw = json.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "id": session.request["id"],
                 "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
                 "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),
@@ -149,7 +149,7 @@ async def test_real_chrome_encrypted_submit_reuses_demo_context_and_rejects_repl
         assert session.status == "submitted"
         with pytest.raises(BaseException):
             await controller._web_data(update, SimpleNamespace(bot=controller.bot))
-        receipt = (tmp_path / "browser_login_receipts.jsonl").read_text()
+        receipt = (tmp_path / "secure_handoff_receipts.jsonl").read_text()
         assert "demo-pass" not in receipt
         assert session.request["id"] in receipt
     finally:
@@ -158,7 +158,7 @@ async def test_real_chrome_encrypted_submit_reuses_demo_context_and_rejects_repl
 
 
 @pytest.mark.asyncio
-async def test_bind_login_accepts_identifier_only_and_secret_only_stages(tmp_path):
+async def test_bind_auth_stage_accepts_identifier_only_and_secret_only_stages(tmp_path):
     site = start_demo()
     controller = await disposable_controller(tmp_path)
     identity = (7, 8, 42)
@@ -170,7 +170,7 @@ async def test_bind_login_accepts_identifier_only_and_secret_only_stages(tmp_pat
             '<input name="password" type="password" inert style="position:absolute;opacity:0;pointer-events:none">'
             '<button type="submit">Continue</button></form>'
         )
-        await controller._bind_login(session)
+        await controller._bind_auth_stage(session)
         assert [field["type"] for field in session.ref_meta.values()] == ["text"]
 
         await session.page.set_content(
@@ -178,7 +178,7 @@ async def test_bind_login_accepts_identifier_only_and_secret_only_stages(tmp_pat
             '<input name="password" autocomplete="current-password" type="password">'
             '<button type="submit">Sign in</button></form>'
         )
-        await controller._bind_login(session)
+        await controller._bind_auth_stage(session)
         assert [field["type"] for field in session.ref_meta.values()] == ["password"]
     finally:
         await controller._close(identity)
@@ -186,7 +186,27 @@ async def test_bind_login_accepts_identifier_only_and_secret_only_stages(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_bind_login_supports_clickable_text_continue_control(tmp_path):
+async def test_bind_auth_stage_accepts_native_email_identifier_for_ios_autofill(tmp_path):
+    site = start_demo()
+    controller = await disposable_controller(tmp_path)
+    identity = (7, 8, 42)
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        await session.page.set_content(
+            '<form method="post" action="/login">'
+            '<label>Email<input type="email" name="email"></label>'
+            '<button type="submit">Continue</button></form>'
+        )
+        await controller._bind_auth_stage(session)
+        assert session.ref_meta["f0"]["type"] == "email"
+        assert session.stage == "identifier"
+    finally:
+        await controller._close(identity)
+        site.close()
+
+
+@pytest.mark.asyncio
+async def test_bind_auth_stage_supports_clickable_text_continue_control(tmp_path):
     site = start_demo()
     controller = await disposable_controller(tmp_path)
     identity = (7, 8, 42)
@@ -197,7 +217,7 @@ async def test_bind_login_supports_clickable_text_continue_control(tmp_path):
             '<input name="username" autocomplete="username" type="text">'
             '<div><p>Continue</p></div></form>'
         )
-        await controller._bind_login(session)
+        await controller._bind_auth_stage(session)
         assert "submit" in session.refs
         assert session.ref_meta["f0"]["type"] == "text"
     finally:
@@ -206,7 +226,7 @@ async def test_bind_login_supports_clickable_text_continue_control(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bind_login_accepts_otp_with_continue_in_sibling_form(tmp_path):
+async def test_bind_auth_stage_accepts_otp_with_continue_in_sibling_form(tmp_path):
     site = start_demo()
     controller = await disposable_controller(tmp_path)
     identity = (7, 8, 42)
@@ -222,7 +242,7 @@ async def test_bind_login_accepts_otp_with_continue_in_sibling_form(tmp_path):
             '</form>'
             '</dialog>'
         )
-        await controller._bind_login(session)
+        await controller._bind_auth_stage(session)
         assert session.ref_meta["f0"]["type"] == "otp"
         assert "submit" in session.refs
     finally:
@@ -255,7 +275,7 @@ async def test_otp_fill_clicks_continue_when_rerender_splits_forms(tmp_path):
             '</script>'
         )
         first = await controller._snapshot(session)
-        assert first["status"] == "waiting_for_login"
+        assert first["status"] == "waiting_for_handoff"
         assert [f["type"] for f in session.request["fields"]] == ["otp"]
         aes, iv = b"e" * 32, b"f" * 12
         body = json.dumps({"values": {session.request["fields"][0]["id"]: "123456"}}).encode()
@@ -265,7 +285,7 @@ async def test_otp_fill_clicks_continue_when_rerender_splits_forms(tmp_path):
         )
         raw = json.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "id": session.request["id"],
                 "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
                 "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),
@@ -308,7 +328,7 @@ async def test_identifier_then_password_mints_fresh_requests_and_reuses_page(tmp
             '}else{document.body.innerHTML="<h1>Authenticated</h1>";}});</script>'
         )
         first = await controller._snapshot(session)
-        assert first["status"] == "waiting_for_login"
+        assert first["status"] == "waiting_for_handoff"
         assert [f["type"] for f in session.request["fields"]] == ["text"]
         first_id = session.request["id"]
         # X can replace the React form nodes while the Mini App is open.
@@ -340,7 +360,7 @@ async def test_identifier_then_password_mints_fresh_requests_and_reuses_page(tmp
             )
             return json.dumps(
                 {
-                    "v": 2,
+                    "v": 3,
                     "id": session.request["id"],
                     "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
                     "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),
@@ -362,7 +382,7 @@ async def test_identifier_then_password_mints_fresh_requests_and_reuses_page(tmp
 
         with pytest.raises(BaseException):
             await controller._web_data(web_update(envelope("demo")), SimpleNamespace(bot=controller.bot))
-        assert session.status == "waiting_for_login"
+        assert session.status == "waiting_for_handoff"
         assert session.request["id"] != first_id
         assert [f["type"] for f in session.request["fields"]] == ["password"]
         second_id = session.request["id"]
@@ -395,7 +415,7 @@ async def test_password_only_form_uses_one_secure_request(tmp_path):
             '<script>document.querySelector("form").addEventListener("submit",e=>{e.preventDefault();document.body.innerHTML="<h1>Authenticated</h1>";});</script>'
         )
         result = await controller._snapshot(session)
-        assert result["status"] == "waiting_for_login"
+        assert result["status"] == "waiting_for_handoff"
         assert [f["type"] for f in session.request["fields"]] == ["password"]
         aes, iv = b"c" * 32, b"d" * 12
         body = json.dumps({"values": {session.request["fields"][0]["id"]: "demo-pass"}}).encode()
@@ -405,7 +425,7 @@ async def test_password_only_form_uses_one_secure_request(tmp_path):
         )
         raw = json.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "id": session.request["id"],
                 "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
                 "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),
@@ -440,14 +460,14 @@ async def test_formless_adapter_binding_is_generic_and_preflighted(tmp_path, mon
             return super().classify_input(metadata)
 
     adapter = FormlessCodeAdapter("fixture-formless", (), ("Next",), True)
-    monkeypatch.setattr(browser_login, "adapter_for_url", lambda _url: adapter)
+    monkeypatch.setattr(secure_handoff, "adapter_for_url", lambda _url: adapter)
     try:
         session = await controller._new_session(identity, site.login_url, demo=True)
         await session.page.set_content(
             '<main><input type="tel" name="Pin" aria-label="Enter code">'
             '<button type="button" formAction="/verify">Next</button></main>'
         )
-        await controller._bind_login(session)
+        await controller._bind_auth_stage(session)
         assert session.form is None
         assert session.ref_meta["f0"]["type"] == "otp"
         await controller._present(session, SimpleNamespace(bot=controller.bot))
@@ -481,7 +501,7 @@ async def test_split_otp_digits_auto_submit_without_submit_control(tmp_path):
             '</script>'
         )
         first = await controller._snapshot(session)
-        assert first["status"] == "waiting_for_login"
+        assert first["status"] == "waiting_for_handoff"
         assert session.request is not None
         request = session.request
         assert [f["type"] for f in request["fields"]] == ["otp"]
@@ -496,7 +516,7 @@ async def test_split_otp_digits_auto_submit_without_submit_control(tmp_path):
         )
         raw = json.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "id": session.request["id"],
                 "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
                 "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),

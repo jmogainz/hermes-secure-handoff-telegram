@@ -3,14 +3,14 @@ requires = ["setuptools>=68,<81", "wheel>=0.42,<1"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hermes-telegram-browser-login"
-version = "0.2.0"
-description = "Owner-scoped encrypted Telegram Mini App handoff for Hermes browser login"
+name = "hermes-telegram-secure-handoff"
+version = "1.0.0"
+description = "Owner-scoped encrypted Telegram Mini App handoff for Hermes"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-authors = [{ name = "Hermes Telegram Browser Login contributors" }]
-keywords = ["hermes", "telegram", "browser", "login", "mini-app"]
+authors = [{ name = "Hermes Secure Handoff Telegram contributors" }]
+keywords = ["hermes", "telegram", "secure-handoff", "browser", "checkout", "mini-app"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
@@ -39,20 +39,20 @@ release = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jmogainz/hermes-remote-web-login-telegram"
-Repository = "https://github.com/jmogainz/hermes-remote-web-login-telegram"
-Issues = "https://github.com/jmogainz/hermes-remote-web-login-telegram/issues"
+Homepage = "https://github.com/jmogainz/hermes-secure-handoff-telegram"
+Repository = "https://github.com/jmogainz/hermes-secure-handoff-telegram"
+Issues = "https://github.com/jmogainz/hermes-secure-handoff-telegram/issues"
 
 [project.scripts]
-telegram-browser-login = "hermes_telegram_browser_login.cli:main"
+telegram-secure-handoff = "hermes_telegram_secure_handoff.cli:main"
 
 [project.entry-points."hermes_agent.plugins"]
-telegram-browser-login = "hermes_telegram_browser_login:register"
+telegram-secure-handoff = "hermes_telegram_secure_handoff:register"
 
 [tool.setuptools]
-package-dir = { hermes_telegram_browser_login = "plugin" }
-packages = ["hermes_telegram_browser_login"]
+package-dir = { hermes_telegram_secure_handoff = "plugin" }
+packages = ["hermes_telegram_secure_handoff"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-hermes_telegram_browser_login = ["plugin.yaml"]
+hermes_telegram_secure_handoff = ["plugin.yaml"]

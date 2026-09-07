@@ -9,11 +9,11 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from telegram import Chat, Message, Update, User
 from telegram.ext import Application, ApplicationHandlerStop
 
-from plugin.logincheck import (
+from plugin.connection_check import (
     FIXED_MARKER,
     MAX_PENDING,
     RuntimeConfig,
-    TelegramLoginPlugin,
+    TelegramSecureHandoffPlugin,
     load_runtime_config,
     register,
 )
@@ -42,7 +42,7 @@ def ptb_command(text, bot=None):
 
 
 def plugin(tmp_path, clock=lambda: 1000.0):
-    return TelegramLoginPlugin(RuntimeConfig("https://example.test/app", frozenset({7})), Ctx(str(tmp_path)), clock=clock)
+    return TelegramSecureHandoffPlugin(RuntimeConfig("https://example.test/app", frozenset({7})), Ctx(str(tmp_path)), clock=clock)
 
 
 def wire_payload(req, plaintext=FIXED_MARKER, key=None):
@@ -109,7 +109,7 @@ async def test_process_update_stops_owned_command_and_allows_unrelated(tmp_path)
     app.bot.__class__.send_message = send_message
     app.bot.__class__.username = "testbot"
     app._initialized = True
-    await app.process_update(ptb_command("/logincheck", app.bot))
+    await app.process_update(ptb_command("/handoffcheck", app.bot))
     assert events == []
     await app.process_update(ptb_command("/other", app.bot))
     assert events == ["generic"]

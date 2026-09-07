@@ -5,6 +5,8 @@ include CONTRIBUTING.md
 include CHANGELOG.md
 include AGENT.md
 include plugin.yaml
+include SECURE_HANDOFF_CONTRACT.md
+include SECURE_HANDOFF_PROTOCOL.md
 recursive-include plugin *.py *.yaml
 recursive-include web *.html *.js *.css *.json *.md
 recursive-include tests *.py *.mjs *.cjs

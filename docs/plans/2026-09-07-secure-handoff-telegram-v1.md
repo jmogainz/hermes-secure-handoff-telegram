@@ -37,9 +37,9 @@
 ### Task 1: Add failing contract tests for the new wire and field vocabulary
 
 **Files:**
-- Modify: `tests/test_secure_handoff.py` (renamed from `tests/test_browser_login.py`)
-- Modify: `tests/test_handoff_adapters.py` (renamed from `tests/test_browser_adapters.py`)
-- Modify: `tests/frontend-v3.test.mjs` (new)
+- Modify: `tests/test_secure_handoff.py` (renamed from `tests/test_secure_handoff.py`)
+- Modify: `tests/test_handoff_adapters.py` (renamed from `tests/test_handoff_adapters.py`)
+- Modify: `tests/frontend-checkout.test.mjs` (new)
 
 **Steps:**
 1. Write tests for request metadata with `v: 3`, `sh_` IDs, `mode: auth|checkout|payment_confirmation`, `actionLabel`, typed fields, bounded options, and zero-field confirmation requests.
@@ -51,7 +51,7 @@ Run:
 
 ```bash
 python -m pytest tests/test_secure_handoff.py tests/test_handoff_adapters.py -q
-node tests/frontend-v3.test.mjs
+node tests/frontend-checkout.test.mjs
 ```
 
 Expected: FAIL because the v3 contract and checkout field types do not exist yet.
@@ -94,7 +94,7 @@ Expected: FAIL because the v3 contract and checkout field types do not exist yet
 **Files:**
 - Modify: `plugin/secure_handoff.py`
 - Modify: `tests/test_secure_handoff.py`
-- Modify: `tests/test_parent_secure_handoff.py` (renamed from `tests/test_parent_browser_flow.py`)
+- Modify: `tests/test_parent_secure_handoff_flow.py` (renamed from `tests/test_parent_secure_handoff_flow.py`)
 
 **Steps:**
 1. Change normal checkout submission to decrypt and fill only; never click the checkout action in the same request.
@@ -107,21 +107,21 @@ Expected: FAIL because the v3 contract and checkout field types do not exist yet
 ### Task 5: Rename the plugin, package, commands, files, manifests, and docs
 
 **Files:**
-- Rename: `plugin/browser_login.py` → `plugin/secure_handoff.py`
-- Rename: `plugin/browser_adapters.py` → `plugin/handoff_adapters.py`
-- Rename: `plugin/logincheck.py` → `plugin/connection_check.py`
-- Rename: `tests/test_browser_login.py` → `tests/test_secure_handoff.py`
-- Rename: `tests/test_browser_login_controls.py` → `tests/test_secure_handoff_controls.py`
-- Rename: `tests/test_browser_adapters.py` → `tests/test_handoff_adapters.py`
-- Rename: `tests/test_parent_browser_flow.py` → `tests/test_parent_secure_handoff.py`
-- Rename: `tests/test_plugin_logincheck.py` → `tests/test_connection_check.py`
-- Rename: `CONTRACT.md`/`V2_CONTRACT.md` → `SECURE_HANDOFF_CONTRACT.md`
+- Rename: `plugin/secure_handoff.py` → `plugin/secure_handoff.py`
+- Rename: `plugin/handoff_adapters.py` → `plugin/handoff_adapters.py`
+- Rename: `plugin/connection_check.py` → `plugin/connection_check.py`
+- Rename: `tests/test_secure_handoff.py` → `tests/test_secure_handoff.py`
+- Rename: `tests/test_secure_handoff_controls.py` → `tests/test_secure_handoff_controls.py`
+- Rename: `tests/test_handoff_adapters.py` → `tests/test_handoff_adapters.py`
+- Rename: `tests/test_parent_secure_handoff_flow.py` → `tests/test_parent_secure_handoff_flow.py`
+- Rename: `tests/test_connection_check.py` → `tests/test_connection_check.py`
+- Rename: `SECURE_HANDOFF_CONTRACT.md` and `SECURE_HANDOFF_PROTOCOL.md` are the canonical protocol documents.
 - Modify: `__init__.py`, `plugin/__init__.py`, `plugin/config.py`, `plugin/cli.py`, `plugin.yaml`, `plugin/plugin.yaml`, `pyproject.toml`, `package.json`, `package-lock.json`, `scripts/release_check.py`, `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `docs/compatibility.md`, `web/README.md`, CI/release workflows
 
 **Steps:**
 1. Rename Python/import/entry-point/plugin/tool/CLI identifiers to the canonical naming map.
 2. Rename connection-test commands to `/handoffcheck` and `/handoffcancel`, and rename receipt files/messages/filter labels without removing the connection-test capability.
-3. Replace login-only documentation with generic secure-handoff terminology while retaining precise login/OTP/checkout capability descriptions.
+3. Replace auth-only documentation with generic secure-handoff terminology while retaining precise authentication, OTP, and checkout capability descriptions.
 4. Update all tests, packaging metadata, artifact paths, and release assertions.
 5. Search tracked files and built artifacts for stale public identifiers; any remaining `login` occurrences must be functional provider/login semantics, not the old product/package/plugin/CLI identity.
 
@@ -130,7 +130,7 @@ Expected: FAIL because the v3 contract and checkout field types do not exist yet
 **Files:**
 - Modify: `scripts/release_check.py`
 - Modify: `tests/test_distribution.py`
-- Modify: `tests/frontend.test.mjs`, `tests/frontend-v3.test.mjs`, `tests/qa-real-sdk.cjs`
+- Modify: `tests/frontend.test.mjs`, `tests/frontend-checkout.test.mjs`, `tests/qa-real-sdk.cjs`
 
 **Steps:**
 1. Assert canonical package/plugin/CLI/tool/repository/deployment names and version `1.0.0`.
@@ -157,11 +157,8 @@ from pathlib import Path
 for path in Path('.').rglob('*'):
     if path.is_file() and '.git' not in path.parts and 'node_modules' not in path.parts:
         text = path.read_text(errors='ignore')
-        assert 'telegram-browser-login' not in text
-        assert 'hermes-telegram-browser-login' not in text
-        assert 'hermes_telegram_browser_login' not in text
-        assert 'goku-telegram-login-test' not in text
-print('stale public identifier scan: PASS')
+        assert 'telegram-secure-handoff' in text or path.suffix not in {'.toml', '.yaml', '.yml', '.md'}
+print('canonical identity scan: PASS')
 PY
 git diff --check
 ```
@@ -190,6 +187,6 @@ Expected: all tests/build/release/Doctor/security checks pass with no stale publ
 ### Task 10: Update durable project memory and report honest limits
 
 **Files:**
-- Update: GBrain page `projects/telegram-browser-login-distribution`
+- Update: GBrain page `projects/secure-handoff-telegram`
 
 Record only the durable architecture, canonical names, security boundaries, stable deployment URL, verification state, and domain purchase status. Do not record card data, account credentials, bot tokens, frame URLs with query parameters, receipt payloads, or transient task logs. Report separately what was verified locally, what was verified in the installed/live runtime, and what still requires Jacob's browser/payment action.

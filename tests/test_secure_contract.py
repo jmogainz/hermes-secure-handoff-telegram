@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from plugin.browser_login import decrypt_submission, make_request
+from plugin.secure_handoff import decrypt_submission, make_request
 
 
 def _envelope(request, key, body):
@@ -88,3 +88,23 @@ def test_v3_decrypts_checkout_values_and_requires_field_free_confirmation():
     values_in_confirmation = _envelope(confirmation, confirmation_key, {"values": {}})
     with pytest.raises(ValueError):
         decrypt_submission(values_in_confirmation, confirmation, confirmation_key)
+
+
+def test_v3_checkout_accepts_a_safe_empty_select_placeholder():
+    request, _ = make_request(
+        "https://checkout.example",
+        [{
+            "id": "f0",
+            "label": "Country",
+            "type": "select",
+            "required": True,
+            "options": [
+                {"value": "", "label": "Choose a country"},
+                {"value": "US", "label": "United States"},
+            ],
+        }],
+        mode="checkout",
+        stage="checkout_details",
+        action_label="Review purchase",
+    )
+    assert request["fields"][0]["options"][0]["value"] == ""

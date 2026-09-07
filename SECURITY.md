@@ -2,10 +2,10 @@
 
 ## Scope
 
-This project moves user-entered website credentials, passkeys, MFA codes, and
-CAPTCHA checkpoints between a private Telegram bot chat and the operator's
+This project moves user-entered authentication, registrant, billing, and
+supported payment fields between a private Telegram bot chat and the operator's
 local Hermes browser profile. The Mini App is a transport boundary, not a
-sandbox or a general credential manager.
+general credential manager or payment processor.
 
 ## Deployment boundary
 
@@ -23,6 +23,14 @@ sandbox or a general credential manager.
   it in the Mini App, repository, chat, CLI arguments, or screenshots.
 - Never paste website credentials or one-time codes into Telegram chat, model
   prompts, terminals, logs, receipts, screenshots, or issue reports.
+- Checkout fields are filled only after an encrypted v3 request is accepted.
+  The final purchase action requires a separate fresh confirmation request with
+  no fields. A browser click does not prove that a provider accepted payment.
+- CAPTCHA, 3DS, MFA, passkeys, provider security screens, and payment outcomes
+  remain user/provider-owned. The plugin never solves or bypasses them.
+- The Mini App uses standard iOS `autocomplete` metadata, but Apple Passwords
+  and payment autofill remain scoped to the Mini App's own origin. A target
+  website origin cannot override that browser rule.
 
 ## Reporting
 

@@ -1,15 +1,16 @@
 {
-  "name": "hermes-telegram-browser-login-web",
+  "name": "hermes-telegram-secure-handoff-web",
   "private": true,
-  "version": "0.2.0",
-  "description": "Browser harness for the Hermes Telegram browser-login Mini App",
+  "version": "1.0.0",
+  "description": "Browser harness for the Hermes Secure Handoff Telegram Mini App",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "test": "npm run test:frontend && npm run test:frontend-v2",
+    "test": "npm run test:frontend && npm run test:auth && npm run test:checkout",
     "test:frontend": "node tests/frontend.test.mjs",
-    "test:frontend-v2": "node tests/frontend-v2.test.mjs",
+    "test:auth": "node tests/frontend-auth.test.mjs",
+    "test:checkout": "node tests/frontend-checkout.test.mjs",
     "test:qa-real-sdk": "node tests/qa-real-sdk.cjs"
   },
   "devDependencies": {

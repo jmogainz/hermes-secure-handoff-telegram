@@ -1,12 +1,12 @@
-name: telegram-browser-login
-version: 0.2.0
+name: telegram-secure-handoff
+version: 1.0.0
 manifest_version: 1
 api_version: 1
 kind: standalone
 description: >
   Owner-scoped encrypted Telegram Mini App handoff that lets Hermes continue
-  authenticated browser work in its dedicated local Chromium profile.
-author: Hermes Telegram Browser Login contributors
+  authenticated browser and checkout work in its dedicated local Chromium profile.
+author: Hermes Secure Handoff Telegram contributors
 license: MIT
 python_dependencies:
   - "cryptography>=42,<48"
@@ -16,7 +16,7 @@ config_schema:
   mini_app_url:
     type: str
     required: false
-    default: "https://hermes-remote-web-login-telegram.vercel.app"
+    default: "https://hermes-secure-handoff-telegram.vercel.app"
     description: "HTTPS origin hosting the Telegram Mini App; the official shared URL is the default"
   allowed_user_ids:
     type: list
@@ -32,4 +32,4 @@ tags:
   - authentication
   - mini-app
 provides_tools:
-  - telegram_browser
+  - telegram_secure_handoff

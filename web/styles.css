@@ -95,13 +95,13 @@ h1 {
   margin: 0;
 }
 
-.v2-details {
+.secure-details {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.v2-details[hidden] {
+.secure-details[hidden] {
   display: none !important;
 }
 

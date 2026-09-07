@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from telegram import Chat, Message, MessageEntity, Update, User, WebAppData
 from telegram.ext import Application, TypeHandler
-from plugin.logincheck import RuntimeConfig, TelegramLoginPlugin
+from plugin.connection_check import RuntimeConfig, TelegramSecureHandoffPlugin
 
 @pytest.mark.asyncio
 async def test_native_web_app_data_returns_to_origin_and_never_reaches_observer(tmp_path, monkeypatch):
@@ -19,7 +19,7 @@ async def test_native_web_app_data_returns_to_origin_and_never_reaches_observer(
     monkeypatch.setattr(type(app.bot), 'send_message', capture)
     # Supply bot identity without getMe/network.
     object.__setattr__(app.bot, '_bot_user', User(999, 'Test', True, username='testbot'))
-    p = TelegramLoginPlugin(RuntimeConfig('https://example.test/', frozenset({7})), SimpleNamespace(data_dir=tmp_path))
+    p = TelegramSecureHandoffPlugin(RuntimeConfig('https://example.test/', frozenset({7})), SimpleNamespace(data_dir=tmp_path))
     p.wire(app, None)
     async def observe(update, context):
         observed.append(update.update_id)
@@ -29,7 +29,8 @@ async def test_native_web_app_data_returns_to_origin_and_never_reaches_observer(
         m = Message(message_id=mid, date=datetime.now(timezone.utc), chat=Chat(7, 'private'), from_user=User(7, 'Tester', False), message_thread_id=thread, **kwargs)
         m.set_bot(app.bot)
         return Update(mid, message=m)
-    await app.process_update(message(1, 42, text='/logincheck', entities=[MessageEntity('bot_command', 0, 11)]))
+    command = '/handoffcheck'
+    await app.process_update(message(1, 42, text=command, entities=[MessageEntity('bot_command', 0, len(command))]))
     assert not observed
     assert sent[-1]['message_thread_id'] == 42
     url = sent[-1]['reply_markup'].keyboard[0][0].web_app.url

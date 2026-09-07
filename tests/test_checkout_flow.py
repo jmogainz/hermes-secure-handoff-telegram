@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from playwright.async_api import async_playwright
 from telegram.ext import ApplicationHandlerStop
 
-from plugin.browser_login import BrowserController
+from plugin.secure_handoff import SecureHandoffController
 from plugin.demo_site import start_demo
 
 
@@ -44,7 +44,7 @@ async def disposable_controller(tmp_path):
         headless=True,
     )
     context = await browser.new_context(ignore_https_errors=True)
-    return BrowserController(Ctx(tmp_path), browser=browser, playwright=playwright, context=context, owns_browser=True)
+    return SecureHandoffController(Ctx(tmp_path), browser=browser, playwright=playwright, context=context, owns_browser=True)
 
 
 def envelope(session, body):
@@ -97,7 +97,7 @@ async def test_checkout_requires_fresh_confirmation_before_payment_action(tmp_pa
             'event.preventDefault(); window.__purchaseClicks += 1; document.body.innerHTML="<h1>Purchase accepted</h1>";});</script></main>'
         )
         first = await controller._snapshot(session)
-        assert first["status"] == "waiting_for_login"
+        assert first["status"] == "waiting_for_handoff"
         assert session.request["v"] == 3
         assert session.request["mode"] == "checkout"
         first_request_id = session.request["id"]
@@ -129,3 +129,54 @@ async def test_checkout_requires_fresh_confirmation_before_payment_action(tmp_pa
             await controller._close(identity)
         await controller._dispose(session)
         site.close()
+
+
+@pytest.mark.asyncio
+async def test_checkout_fills_https_child_frame_before_fresh_confirmation(tmp_path):
+    top_site = start_demo()
+    frame_site = start_demo()
+    controller = await disposable_controller(tmp_path)
+    controller.loop = asyncio.get_running_loop()
+    controller.bot = Bot()
+    identity = (7, 8, 42)
+    session = None
+    try:
+        session = await controller._new_session(identity, top_site.login_url, demo=True)
+        await session.page.set_content(
+            f'<main><iframe title="payment fields" src="{frame_site.origin}/checkout-frame"></iframe>'
+            '<button id="pay" type="button" onclick="window.__paymentClicks=(window.__paymentClicks||0)+1;document.body.innerHTML=\'<h1>Payment submitted</h1>\'">Pay</button></main>'
+        )
+        await session.page.frames[-1].wait_for_load_state("domcontentloaded")
+        first = await controller._snapshot(session)
+        assert first["status"] == "waiting_for_handoff"
+        assert session.request["mode"] == "checkout"
+        frame = session.page.frames[-1]
+        values = {field["id"]: f"synthetic-{field['type']}" for field in session.request["fields"]}
+
+        with pytest.raises(ApplicationHandlerStop):
+            await controller._web_data(
+                update(envelope(session, {"values": values})),
+                SimpleNamespace(bot=controller.bot),
+            )
+
+        assert session.status == "waiting_for_confirmation"
+        assert await frame.locator('[autocomplete="cc-number"]').input_value() == "synthetic-card_number"
+        assert await frame.locator('[autocomplete="cc-exp"]').input_value() == "synthetic-card_expiry"
+        assert await frame.locator('[autocomplete="cc-csc"]').input_value() == "synthetic-cvc"
+        assert await session.page.evaluate("window.__paymentClicks || 0") == 0
+
+        with pytest.raises(ApplicationHandlerStop):
+            await controller._web_data(
+                update(envelope(session, {"confirm": True})),
+                SimpleNamespace(bot=controller.bot),
+            )
+
+        assert session.status == "submitted"
+        assert await session.page.evaluate("window.__paymentClicks") == 1
+        assert await session.page.locator("h1").inner_text() == "Payment submitted"
+    finally:
+        if session is not None:
+            await controller._close(identity)
+        await controller._dispose(session)
+        top_site.close()
+        frame_site.close()

@@ -15,12 +15,12 @@ ROOT = Path(__file__).parents[1]
 def test_distribution_metadata_exposes_namespaced_hermes_entry_point():
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     project = metadata["project"]
-    assert project["name"] == "hermes-telegram-browser-login"
-    assert project["entry-points"]["hermes_agent.plugins"]["telegram-browser-login"] == (
-        "hermes_telegram_browser_login:register"
+    assert project["name"] == "hermes-telegram-secure-handoff"
+    assert project["entry-points"]["hermes_agent.plugins"]["telegram-secure-handoff"] == (
+        "hermes_telegram_secure_handoff:register"
     )
-    assert project["scripts"]["telegram-browser-login"] == "hermes_telegram_browser_login.cli:main"
-    assert metadata["tool"]["setuptools"]["package-dir"]["hermes_telegram_browser_login"] == "plugin"
+    assert project["scripts"]["telegram-secure-handoff"] == "hermes_telegram_secure_handoff.cli:main"
+    assert metadata["tool"]["setuptools"]["package-dir"]["hermes_telegram_secure_handoff"] == "plugin"
 
 
 def test_directory_and_package_manifests_stay_in_sync():
@@ -63,7 +63,7 @@ def test_setup_validation_rejects_remote_cdp():
 
 
 def test_browser_controller_fails_closed_for_invalid_runtime_settings():
-    from plugin.browser_login import BrowserController
+    from plugin.secure_handoff import SecureHandoffController
 
     class InvalidContext:
         def get_config(self, key):
@@ -73,7 +73,7 @@ def test_browser_controller_fails_closed_for_invalid_runtime_settings():
                 "browser_cdp_url": "http://192.0.2.1:9222",
             }[key]
 
-    controller = BrowserController(InvalidContext())
+    controller = SecureHandoffController(InvalidContext())
     assert controller.config is None
     assert controller._owners() == set()
     with pytest.raises(ValueError):
@@ -100,7 +100,7 @@ def test_setup_uses_official_shared_mini_app_by_default(monkeypatch):
     assert cli.setup(args) == 0
     assert [
         "hermes", "config", "set", "--force",
-        "plugins.entries.telegram-browser-login.settings.mini_app_url",
+        "plugins.entries.telegram-secure-handoff.settings.mini_app_url",
         cli.DEFAULT_MINI_APP_URL,
     ] in calls
 
@@ -134,10 +134,10 @@ def test_setup_writes_namespaced_settings_and_verifies_them(monkeypatch, capsys)
     ])
 
     assert cli.setup(args) == 0
-    assert ["hermes", "plugins", "enable", "telegram-browser-login", "--no-allow-tool-override"] in calls
+    assert ["hermes", "plugins", "enable", "telegram-secure-handoff", "--no-allow-tool-override"] in calls
     assert [
         "hermes", "config", "set", "--force",
-        "plugins.entries.telegram-browser-login.settings.mini_app_url",
+        "plugins.entries.telegram-secure-handoff.settings.mini_app_url",
         "https://mini.example/app",
     ] in calls
     allowed_call = next(

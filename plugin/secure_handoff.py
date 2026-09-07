@@ -8,13 +8,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 try:
-    from .handoff_adapters import CHECKOUT_KINDS, PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
+    from .handoff_adapters import PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
     from .config import DEFAULT_CDP_URL, validate_browser_cdp_url
-    from .logincheck import load_runtime_config
+    from .connection_check import load_runtime_config
 except ImportError:  # Standalone Hermes plugin loader path.
-    from handoff_adapters import CHECKOUT_KINDS, PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
+    from handoff_adapters import PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
     from config import DEFAULT_CDP_URL, validate_browser_cdp_url
-    from logincheck import load_runtime_config
+    from connection_check import load_runtime_config
 
 TTL = 600
 IDLE_TTL = 1800
@@ -32,7 +32,6 @@ CHECKOUT_ACTIONS = {
     "submit payment",
     "authorize purchase",
 }
-SAFE_LABELS = {"Username or email", "Password", "One-time code", "Code"}
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REF_RE = re.compile(r"^r[0-9a-zA-Z_-]{1,32}$")
 
@@ -58,7 +57,7 @@ def _validate_v3_fields(fields: list[dict], mode: str) -> None:
     if not 1 <= len(fields) <= MAX_FIELDS:
         raise ValueError("invalid fields")
     id_pattern = re.compile(r"^f(?:[0-9]|1[0-9]|2[0-3])$")
-    option_pattern = re.compile(r"^[^\\x00-\\x1f]{1,128}$")
+    option_pattern = re.compile(r"^[^\x00-\x1f]{0,128}$")
     seen: set[str] = set()
     for field in fields:
         if not isinstance(field, dict):
@@ -94,7 +93,6 @@ def _validate_v3_fields(fields: list[dict], mode: str) -> None:
                     or set(option) != {"value", "label"}
                     or not isinstance(option["value"], str)
                     or not isinstance(option["label"], str)
-                    or not option["value"]
                     or not option["label"].strip()
                     or not option_pattern.fullmatch(option["value"])
                     or not option_pattern.fullmatch(option["label"])
@@ -123,7 +121,7 @@ def make_request(
     *,
     stage: str = "browser_auth",
     provider: str = "generic",
-    mode: str | None = None,
+    mode: str = "auth",
     action_label: str | None = None,
 ) -> tuple[dict, Any]:
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -131,35 +129,18 @@ def make_request(
     _origin(origin)
     if not SAFE_TOKEN_RE.fullmatch(stage) or not SAFE_TOKEN_RE.fullmatch(provider):
         raise ValueError("invalid stage")
-
-    if mode is None:
-        if (
-            not 1 <= len(fields) <= 4
-            or any(
-                not isinstance(f, dict)
-                or set(f) - {"id", "label", "type", "required"}
-                or not re.fullmatch(r"f[0-3]", str(f.get("id", "")))
-                or f.get("label") not in SAFE_LABELS
-                or f.get("type") not in {"text", "password", "otp"}
-                for f in fields
-            )
-        ):
-            raise ValueError("invalid fields")
-        version = 2
-        request_id = "bl_" + secrets.token_urlsafe(16)
-    else:
-        if mode not in {"auth", "checkout", "payment_confirmation"}:
-            raise ValueError("invalid mode")
-        _validate_v3_fields(fields, mode)
-        if action_label is None:
-            action_label = {
-                "auth": "Submit to browser",
-                "checkout": "Review purchase",
-                "payment_confirmation": "Authorize purchase",
-            }[mode]
-        action_label = _validate_action_label(action_label)
-        version = 3
-        request_id = "sh_" + secrets.token_urlsafe(16)
+    if mode not in {"auth", "checkout", "payment_confirmation"}:
+        raise ValueError("invalid mode")
+    _validate_v3_fields(fields, mode)
+    if action_label is None:
+        action_label = {
+            "auth": "Submit to browser",
+            "checkout": "Review purchase",
+            "payment_confirmation": "Authorize purchase",
+        }[mode]
+    action_label = _validate_action_label(action_label)
+    version = 3
+    request_id = "sh_" + secrets.token_urlsafe(16)
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     n = key.public_key().public_numbers()
@@ -240,7 +221,7 @@ def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
 class Session:
     user: int; chat: int; thread: int|None; page: Any = field(default=None, repr=False); context: Any = field(default=None, repr=False); request: dict|None = None; key: Any = field(default=None, repr=False); site: Any = field(default=None, repr=False); refs: dict[str, Any] = field(default_factory=dict, repr=False); ref_meta: dict[str, dict] = field(default_factory=dict, repr=False); field_parts: dict[str, list[Any]] = field(default_factory=dict, repr=False); field_frames: dict[str, Any] = field(default_factory=dict, repr=False); field_origins: dict[str, str] = field(default_factory=dict, repr=False); field_documents: dict[str, Any] = field(default_factory=dict, repr=False); auto_submit: bool = False; status: str = "open"; mode: str = "auth"; checkout_filled: bool = False; used_ids: set[str] = field(default_factory=set, repr=False); wake: asyncio.Event|None = field(default=None, repr=False); lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False); updated: float = field(default_factory=time.monotonic); document: Any = field(default=None, repr=False); form: Any = field(default=None, repr=False); scope: Any = field(default=None, repr=False); form_action: str = field(default="", repr=False); submit_action: str = field(default="", repr=False); provider: str = "generic"; stage: str = "browser_auth"
 
-class BrowserController:
+class SecureHandoffController:
     def __init__(self, ctx: Any, *, browser=None, playwright=None, context=None, owns_browser=False):
         self.ctx=ctx; self.config=load_runtime_config(ctx); self.loop=None; self.bot=None; self.adapter=None; self._playwright=playwright; self._browser=browser; self._context=context; self._owns_browser=owns_browser; self._cdp_url=""; self.sessions={}; self._lock=threading.RLock()
     def _identity(self):
@@ -257,12 +238,12 @@ class BrowserController:
         try:
             data_dir=getattr(self.ctx,"data_dir",None) or getattr(getattr(self.ctx,"state",None),"data_dir",None)
             if not data_dir or not s.request: return
-            path=__import__("pathlib").Path(data_dir)/"browser_login_receipts.jsonl"
+            path=__import__("pathlib").Path(data_dir)/"secure_handoff_receipts.jsonl"
             path.parent.mkdir(parents=True,exist_ok=True)
             try: path.touch(mode=0o600,exist_ok=True); path.chmod(0o600)
             except OSError: pass
             with path.open("a",encoding="utf-8") as handle:
-                row={"v":2,"id":s.request["id"],"status":s.status,"thread":s.thread,"time":int(time.time()*1000)}
+                row={"v":3,"id":s.request["id"],"status":s.status,"thread":s.thread,"time":int(time.time()*1000)}
                 if reason in {"expiry","refresh_stage","preflight_before_decrypt","decrypt","preflight_after_decrypt","fill","refresh_before_click","preflight_after_fill","click","auto_submit","rebind"}: row["reason"]=reason
                 handle.write(json.dumps(row,separators=(",",":"))+"\n")
         except Exception: pass
@@ -350,7 +331,7 @@ class BrowserController:
         await page.goto(url,wait_until="domcontentloaded",timeout=30000)
         origin=_origin(page.url); adapter=adapter_for_origin(origin)
         s=Session(*ident,page=page,context=context,wake=asyncio.Event(),provider=adapter.name); self.sessions[ident]=s; return s
-    async def _bind_login(self, s):
+    async def _bind_auth_stage(self, s):
         page=s.page; adapter=adapter_for_url(page.url); s.provider=adapter.name; candidates=[]
         for e in await page.locator("input").all():
             try:
@@ -377,7 +358,7 @@ class BrowserController:
                 grouped.append((form,scope,[]))
                 group=grouped[-1]
             group[2].append((kind,element,metadata))
-        eligible=[g for g in grouped if any(k in {"text","password","otp"} for k,_,_ in g[2])]
+        eligible=[g for g in grouped if any(k in {"text","email","tel","number","password","otp"} for k,_,_ in g[2])]
         secret=[g for g in eligible if any(k in {"password","otp"} for k,_,_ in g[2])]
         if len(secret)==1: eligible=secret
         if len(eligible)!=1: raise ValueError
@@ -395,10 +376,10 @@ class BrowserController:
         s.document=await page.evaluate_handle("() => document"); s.form=form; s.scope=scope; s.form_action=action; s.submit_action=submit_action
         logical=[("otp",candidates[0][1],[element for _,element,_ in candidates])] if split_otp else [(kind,element,[element]) for kind,element,_ in candidates]
         s.stage=adapter.stage_for(tuple(kind for kind,_,_ in logical)).id
-        s.refs={}; s.ref_meta={}; s.field_parts={}; s.auto_submit=split_otp and submit is None
+        s.mode="auth"; s.refs={}; s.ref_meta={}; s.field_parts={}; s.field_frames={}; s.field_origins={}; s.field_documents={}; s.auto_submit=split_otp and submit is None
+        labels={"text":"Username or email","email":"Email","tel":"Phone","number":"Number","password":"Password","otp":"One-time code"}
         for i,(kind,element,parts) in enumerate(logical):
-            field_id=f"f{i}"; label={"text":"Username or email","password":"Password","otp":"One-time code"}[kind]
-            s.refs[field_id]=element; s.field_parts[field_id]=parts; s.ref_meta[field_id]={"label":label,"type":kind,"required":True}
+            field_id=f"f{i}"; s.refs[field_id]=element; s.field_parts[field_id]=parts; s.field_frames[field_id]=page.main_frame; s.field_origins[field_id]=_origin(page.url); s.field_documents[field_id]=s.document; s.ref_meta[field_id]={"label":labels[kind],"type":kind,"required":True}
         if submit is not None: s.refs["submit"]=submit
     def _reset_binding(self, s):
         s.refs = {}
@@ -577,7 +558,7 @@ class BrowserController:
             await self._bind_checkout(s)
         except Exception:
             self._reset_binding(s)
-            await self._bind_login(s)
+            await self._bind_auth_stage(s)
             s.mode = "auth"
 
     async def _related_submit(self, page, form, scope, handle):
@@ -628,7 +609,7 @@ class BrowserController:
         s.status="cancelled"; s.key=None
         if s.wake: s.wake.set()
         await self._dispose(s); return {"status":"closed"}
-    async def _login_detected(self,s):
+    async def _auth_stage_detected(self,s):
         try:
             adapter=adapter_for_url(str(getattr(s.page,"url","") or ""))
             for e in await s.page.locator("input").all():
@@ -653,15 +634,17 @@ class BrowserController:
         except Exception: pass
         s.refs,s.ref_meta=refs,meta; return refs,meta
     async def _stage_detected(self, s):
+        safe_refs, safe_meta = s.refs, s.ref_meta
         try:
             await self._bind_stage(s)
             return True
         except Exception:
             self._reset_binding(s)
+            s.refs, s.ref_meta = safe_refs, safe_meta
             return False
 
     async def _ensure_prompt(self,s):
-        if s.request and s.key and s.status in {"waiting_for_login", "waiting_for_confirmation"}:
+        if s.request and s.key and s.status in {"waiting_for_handoff", "waiting_for_confirmation"}:
             try:
                 await self._preflight(s)
                 return {"status":s.status,"url":_origin(s.page.url)}
@@ -720,8 +703,8 @@ class BrowserController:
                     return await self._present(s,SimpleNamespace(bot=self.bot),False)
             except Exception:
                 s=self.sessions.get(ident)
-                if s: s.status="unsupported_login"
-                return {"status":"unsupported_login"}
+                if s: s.status="unsupported_stage"
+                return {"status":"unsupported_stage"}
         if action=="close": return await self._close(ident)
         s=self.sessions.get(ident)
         if not s: return {"status":"unavailable"}
@@ -739,8 +722,8 @@ class BrowserController:
                     await self._bind_stage(s)
                     return await self._present(s,SimpleNamespace(bot=self.bot),False)
                 except Exception:
-                    s.status="unsupported_login"
-                    return {"status":"unsupported_login"}
+                    s.status="unsupported_stage"
+                    return {"status":"unsupported_stage"}
             if action in {"click","type"}: return await self._ordinary(s,action,args)
         return {"status":"invalid"}
     def tool(self,args=None,**kwargs):
@@ -796,7 +779,7 @@ class BrowserController:
             from telegram import KeyboardButton,ReplyKeyboardMarkup,WebAppInfo
             markup=ReplyKeyboardMarkup([[KeyboardButton("Open secure handoff",web_app=WebAppInfo(url=launch))]],resize_keyboard=True)
             if not await self._send(c,s.chat,s.thread,f"{descriptor.title} handoff is ready. Submit only to this browser.",markup): raise RuntimeError
-            s.status="waiting_for_login"; return {"status":"waiting_for_login","url":_origin(s.page.url)}
+            s.status="waiting_for_handoff"; return {"status":"waiting_for_handoff","url":_origin(s.page.url)}
         except Exception:
             s.status="publication_failed"; s.key=None; s.request=None
             return {"status":"publication_failed"}
@@ -831,7 +814,7 @@ class BrowserController:
             if not parts: raise ValueError
             for e in parts:
                 if not e or not await e.is_visible() or not await e.is_enabled() or not await e.is_editable(): raise ValueError
-                if s.mode == "checkout":
+                if s.mode in {"checkout", "payment_confirmation"}:
                     frame=s.field_frames.get(field_id); expected_origin=s.field_origins.get(field_id); document=s.field_documents.get(field_id)
                     if frame is None or frame.is_detached() or not expected_origin or _origin(frame.url)!=expected_origin: raise ValueError
                     if await frame.evaluate("d => d === document",document) is not True: raise ValueError
@@ -865,13 +848,13 @@ class BrowserController:
         if s.mode == "checkout":
             await self._bind_checkout(s)
         else:
-            await self._bind_login(s)
+            await self._bind_auth_stage(s)
         actual=[(s.ref_meta[k]["label"],s.ref_meta[k]["type"],bool(s.ref_meta[k]["required"])) for k in sorted(s.ref_meta) if k.startswith("f")]
         if actual!=expected: raise ValueError
     async def _wait_for_auto_submit(self,s,timeout=5.0):
         deadline=time.monotonic()+timeout
         while time.monotonic()<deadline:
-            if not await self._login_detected(s): return
+            if not await self._auth_stage_detected(s): return
             await asyncio.sleep(0.1)
         raise ValueError
     async def _rebind_or_finish(self,s,c):
@@ -902,7 +885,7 @@ class BrowserController:
         raw=getattr(getattr(getattr(u,"effective_message",None),"web_app_data",None),"data",None)
         try: rid=json.loads(raw).get("id") if isinstance(raw,str) else None
         except Exception: rid=None
-        if not isinstance(rid,str) or not (rid.startswith("bl_") or rid.startswith("sh_")):
+        if not isinstance(rid,str) or not rid.startswith("sh_"):
             return
         s=next((x for x in self.sessions.values() if x.request and x.request.get("id")==rid),None)
         from telegram.ext import ApplicationHandlerStop
@@ -957,12 +940,12 @@ class BrowserController:
     def _wake_text(self,status,origin):
         site=origin or "unknown"
         return (
-            "[browser-login wakeup] Encrypted Mini App handoff finished. "
+            "[secure-handoff wakeup] Encrypted Mini App handoff finished. "
             f"Status: {status}. Site: {site}. Credentials are not included. "
-            "Inspect the live browser and continue the current login task. "
-            "If status is waiting_for_login, a new Mini App was published. "
+            "Inspect the live browser and continue the current handoff task. "
+            "If status is waiting_for_handoff, a new Mini App was published. "
             "If rejected, diagnose from receipts without reading field values. "
-            "If submitted, verify whether the site is signed in."
+            "If submitted, verify the provider's resulting state."
         )
     def _schedule_wake(self,s):
         if self.adapter is None or not self.loop or not self.loop.is_running(): return
@@ -971,7 +954,7 @@ class BrowserController:
         except Exception: pass
     async def _wake_session(self,status,user,chat,thread,origin):
         adapter=self.adapter
-        if adapter is None or status not in {"submitted","rejected","waiting_for_login","publication_failed","stage_submitted"}: return
+        if adapter is None or status not in {"submitted","rejected","waiting_for_handoff","publication_failed","stage_submitted"}: return
         source=SimpleNamespace(chat_id=str(chat),user_id=str(user),thread_id=str(thread) if thread is not None else None)
         try: await self._deliver_wake(adapter,self._wake_text(status,origin),source)
         except Exception: pass
@@ -982,7 +965,7 @@ class BrowserController:
         real=SessionSource(platform=Platform.TELEGRAM,chat_id=str(source.chat_id),chat_type="dm",user_id=str(source.user_id) if source.user_id else None,thread_id=str(source.thread_id) if getattr(source,"thread_id",None) is not None else None)
         await deliver_wake(adapter,text=text,source=real)
     def _owns_request_id(self, request_id):
-        if not isinstance(request_id,str) or not request_id.startswith("bl_"):
+        if not isinstance(request_id,str) or not request_id.startswith("sh_"):
             return False
         with self._lock:
             return any(s.request and s.request.get("id")==request_id for s in self.sessions.values())
@@ -1001,15 +984,15 @@ class BrowserController:
     def close(self):
         i=self._identity(); return self._submit(self._close(i)) if i else {"status":"unavailable"}
 
-SCHEMA={"name":"telegram_browser","description":"Use for Telegram browser work on Hermes's shared Chrome profile. Login-aware owner-scoped controls; never submit secrets.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"ref":{"type":"string"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90}},"required":["action"],"additionalProperties":False}}
+SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"ref":{"type":"string"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90}},"required":["action"],"additionalProperties":False}}
 def register(ctx):
-    c=BrowserController(ctx)
+    c=SecureHandoffController(ctx)
     if c.config is not None and len(c.config.allowed_user_ids)!=1:
         return None
     try: c._configured_cdp_url()
     except ValueError: return None
-    ctx.register_tool(name="telegram_browser",toolset="telegram_browser",schema=SCHEMA,handler=c.tool)
+    ctx.register_tool(name="telegram_secure_handoff",toolset="telegram_secure_handoff",schema=SCHEMA,handler=c.tool)
     ctx.register_telegram_handler(c.wire)
     return c
 def wire(controller,application,adapter=None): controller.wire(application,adapter)
-__all__=["BrowserController","SCHEMA","decrypt_submission","make_request","register","wire"]
+__all__=["SecureHandoffController","SCHEMA","decrypt_submission","make_request","register","wire"]

@@ -23,7 +23,7 @@ try:
 except ImportError:  # Standalone Hermes plugin loader path.
     from config import DEFAULT_CDP_URL, DEFAULT_MINI_APP_URL, validate_browser_cdp_url
 
-PLUGIN_ID = "telegram-browser-login"
+PLUGIN_ID = "telegram-secure-handoff"
 
 def _validate_mini_app_url(raw: str) -> str:
     if not isinstance(raw, str):
@@ -97,7 +97,7 @@ def _require_hermes() -> None:
     if shutil.which("hermes") is None:
         raise SystemExit(
             "Hermes CLI was not found on PATH. Install Hermes first, then rerun "
-            "telegram-browser-login setup."
+            "telegram-secure-handoff setup."
         )
 
 
@@ -257,7 +257,7 @@ def doctor(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="telegram-browser-login")
+    parser = argparse.ArgumentParser(prog="telegram-secure-handoff")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     setup_parser = subparsers.add_parser(

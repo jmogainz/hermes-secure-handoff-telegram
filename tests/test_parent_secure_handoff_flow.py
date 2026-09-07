@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from plugin.browser_login import BrowserController
+from plugin.secure_handoff import SecureHandoffController
 from plugin.demo_site import start_demo
 
 
@@ -76,7 +76,7 @@ async def disposable_controller(path):
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(channel=os.environ.get("PLAYWRIGHT_CHANNEL", "chrome"), headless=True)
     context = await browser.new_context(ignore_https_errors=True)
-    return BrowserController(Ctx(path), browser=browser, playwright=pw, context=context, owns_browser=True)
+    return SecureHandoffController(Ctx(path), browser=browser, playwright=pw, context=context, owns_browser=True)
 
 
 def update(text=None, data=None, thread=42, user=7):
@@ -101,12 +101,12 @@ async def test_deployed_form_native_demo_roundtrip(tmp_path):
     identity = (7, 7, 42)
     try:
         result = await c._run("open", {"url": site.login_url, "demo": True}, identity)
-        assert result["status"] == "waiting_for_login"
+        assert result["status"] == "waiting_for_handoff"
         session = c.sessions[identity]
         prompt = next(m for m in reversed(c.bot.sent) if m.get("reply_markup"))
         assert prompt["message_thread_id"] == 42
         launch = prompt["reply_markup"].keyboard[0][0].web_app.url
-        assert session.request and session.request["v"] == 2
+        assert session.request and session.request["v"] == 3
 
         ui_context = await c._browser.new_context(viewport={"width": 375, "height": 812})
         ui = await ui_context.new_page()
@@ -120,7 +120,7 @@ async def test_deployed_form_native_demo_roundtrip(tmp_path):
             launch + "&tgWebAppVersion=9.6&tgWebAppPlatform=ios&tgWebAppThemeParams=%7B%7D",
             wait_until="networkidle",
         )
-        await ui.wait_for_function("document.querySelector('.app-card')?.dataset.state==='v2Ready'")
+        await ui.wait_for_function("document.querySelector('.app-card')?.dataset.state==='secureReady'")
         for f in session.request["fields"]:
             await ui.locator("#field-" + f["id"]).fill(
                 "demo-pass" if f["type"] == "password" else "demo"
@@ -129,7 +129,7 @@ async def test_deployed_form_native_demo_roundtrip(tmp_path):
         await ui.locator("#send-button").click()
         await ui.wait_for_function("window.__sent.length===1")
         raw = await ui.evaluate("window.__sent[0]")
-        assert json.loads(raw)["v"] == 2
+        assert json.loads(raw)["v"] == 3
         with pytest.raises(ApplicationHandlerStop):
             await c._web_data(update(data=raw, thread=42), SimpleNamespace(bot=c.bot))
         assert session.status == "submitted"
@@ -156,10 +156,10 @@ async def test_real_agent_controls_prompt_wait_type_click_and_stale_refs(tmp_pat
     enc = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
     try:
         result = await c._run("open", {"url": site.login_url, "demo": True}, ident)
-        assert result["status"] == "waiting_for_login"
+        assert result["status"] == "waiting_for_handoff"
         assert len(c.bot.sent) == 1
         s = c.sessions[ident]
-        assert (await c._run("read", {}, ident))["status"] == "waiting_for_login"
+        assert (await c._run("read", {}, ident))["status"] == "waiting_for_handoff"
         assert len(c.bot.sent) == 1
         waiter = asyncio.create_task(c._run("wait", {"timeout": 3}, ident))
         await asyncio.sleep(0)
@@ -175,7 +175,7 @@ async def test_real_agent_controls_prompt_wait_type_click_and_stale_refs(tmp_pat
         )
         raw = json.dumps(
             {
-                "v": 2,
+                "v": 3,
                 "id": s.request["id"],
                 "wrappedKey": enc(wrapped),
                 "iv": enc(iv),

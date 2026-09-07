@@ -1,15 +1,15 @@
-"""Hermes Telegram browser-login plugin entry point."""
+"""Hermes Secure Handoff Telegram plugin entry point."""
 
-from .logincheck import register as register_v1
-from .browser_login import register as register_v2
+from .connection_check import register as register_connection_check
+from .secure_handoff import register as register_secure_handoff
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 
 def register(ctx):
-    """Register the legacy connection check and browser handoff surfaces."""
-    register_v1(ctx)
-    return register_v2(ctx)
+    """Register the connection check and secure handoff surfaces."""
+    register_connection_check(ctx)
+    return register_secure_handoff(ctx)
 
 
 __all__ = ["register", "__version__"]

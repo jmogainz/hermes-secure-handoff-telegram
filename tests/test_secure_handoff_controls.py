@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugin.browser_login import BrowserController, Session
+from plugin.secure_handoff import SecureHandoffController, Session
 
 
 class Ctx:
@@ -25,7 +25,7 @@ class Bot:
 
 @pytest.mark.asyncio
 async def test_attaches_to_running_hermes_chrome_without_owning_or_closing_it():
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     await controller._ensure_runtime()
     assert controller._cdp_url == "http://127.0.0.1:9222"
     assert controller._browser is not None
@@ -37,7 +37,7 @@ async def test_attaches_to_running_hermes_chrome_without_owning_or_closing_it():
 
 @pytest.mark.asyncio
 async def test_wait_releases_lock_for_concurrent_submit_and_close_wakes_waiter():
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     session = Session(7, 8, None, wake=asyncio.Event())
     controller.sessions[(7, 8, None)] = session
 
@@ -59,7 +59,7 @@ async def test_wait_releases_lock_for_concurrent_submit_and_close_wakes_waiter()
 
 
 def test_tool_rejects_user_outside_native_allowed_scope(monkeypatch):
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     monkeypatch.setattr(controller, "_identity", lambda: (99, 8, None))
     assert json.loads(controller.tool({"action": "read"})) == {"status": "rejected"}
 
@@ -90,7 +90,7 @@ async def test_replaced_safe_ref_is_rejected_without_action():
         async def click(self, **_):
             raise AssertionError("detached ref must never be clicked")
 
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     session = Session(7, 8, None, page=Page())
     session.refs = {"rgen": Handle()}
     assert await controller._ordinary(session, "click", {"ref": "rgen"}) == {"status": "stale_ref"}
@@ -98,7 +98,7 @@ async def test_replaced_safe_ref_is_rejected_without_action():
 
 @pytest.mark.asyncio
 async def test_open_binds_auth_and_publishes_in_existing_session(monkeypatch):
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     controller.bot = Bot()
     monkeypatch.setattr(controller, "_identity", lambda: (7, 8, None))
 
@@ -116,14 +116,14 @@ async def test_open_binds_auth_and_publishes_in_existing_session(monkeypatch):
         }
 
     monkeypatch.setattr(controller, "_new_session", new_session)
-    monkeypatch.setattr(controller, "_bind_login", bind)
+    monkeypatch.setattr(controller, "_bind_auth_stage", bind)
     presented = []
     async def present(session, context, demo=False):
         presented.append((session, context, demo))
-        return {"status": "waiting_for_login"}
+        return {"status": "waiting_for_handoff"}
     monkeypatch.setattr(controller, "_present", present)
     result = await controller._run("open", {"url": "https://fixture.example/login"}, (7, 8, None))
-    assert result["status"] == "waiting_for_login"
+    assert result["status"] == "waiting_for_handoff"
     assert presented and presented[0][0] is controller.sessions[(7, 8, None)]
 
 
@@ -133,17 +133,17 @@ async def test_open_binds_auth_and_publishes_in_existing_session(monkeypatch):
     ({"f0": {"label": "One-time code", "type": "otp", "required": True}}, ["One-time code"]),
 ])
 async def test_publication_uses_exact_bound_password_or_otp_controls(metadata, labels):
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     controller.bot = Bot()
     session = Session(7, 8, None, page=SimpleNamespace(url="https://fixture.example/login"), ref_meta=metadata)
     result = await controller._present(session, SimpleNamespace(bot=controller.bot))
-    assert result["status"] == "waiting_for_login"
+    assert result["status"] == "waiting_for_handoff"
     assert [field["label"] for field in session.request["fields"]] == labels
 
 
 @pytest.mark.asyncio
 async def test_login_wakeup_targets_origin_chat_with_status_only_text():
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     controller.adapter = object()
     controller.loop = asyncio.get_running_loop()
     captured = []
@@ -164,13 +164,13 @@ async def test_login_wakeup_targets_origin_chat_with_status_only_text():
     assert captured[0]["adapter"] is controller.adapter
     assert "rejected" in captured[0]["text"]
     assert "https://x.com" in captured[0]["text"]
-    assert "browser-login wakeup" in captured[0]["text"]
+    assert "secure-handoff wakeup" in captured[0]["text"]
     assert "secret-value" not in captured[0]["text"]
 
 
 @pytest.mark.asyncio
 async def test_login_wakeup_is_skipped_without_adapter():
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     controller.loop = asyncio.get_running_loop()
     called = []
 
@@ -187,7 +187,7 @@ async def test_login_wakeup_is_skipped_without_adapter():
 
 @pytest.mark.asyncio
 async def test_attach_targets_existing_nonfirst_page_without_navigation(monkeypatch):
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     controller.bot = Bot()
     identity = (7, 8, None)
 
@@ -214,9 +214,9 @@ async def test_attach_targets_existing_nonfirst_page_without_navigation(monkeypa
 
     async def present(session, context, demo=False):
         assert session.page is target_page
-        return {"status": "waiting_for_login"}
+        return {"status": "waiting_for_handoff"}
 
-    monkeypatch.setattr(controller, "_bind_login", bind)
+    monkeypatch.setattr(controller, "_bind_auth_stage", bind)
     monkeypatch.setattr(controller, "_present", present)
 
     result = await controller._run(
@@ -225,14 +225,14 @@ async def test_attach_targets_existing_nonfirst_page_without_navigation(monkeypa
         identity,
     )
 
-    assert result == {"status": "waiting_for_login"}
+    assert result == {"status": "waiting_for_handoff"}
     assert first_page.goto_calls == []
     assert target_page.goto_calls == []
 
 
 @pytest.mark.asyncio
 async def test_present_current_stage_does_not_reload_attached_page(monkeypatch):
-    controller = BrowserController(Ctx())
+    controller = SecureHandoffController(Ctx())
     controller.bot = Bot()
     identity = (7, 8, None)
 
@@ -256,12 +256,12 @@ async def test_present_current_stage_does_not_reload_attached_page(monkeypatch):
 
     async def present(current, context, demo=False):
         assert current is session
-        return {"status": "waiting_for_login"}
+        return {"status": "waiting_for_handoff"}
 
-    monkeypatch.setattr(controller, "_bind_login", bind)
+    monkeypatch.setattr(controller, "_bind_auth_stage", bind)
     monkeypatch.setattr(controller, "_present", present)
 
     result = await controller._run("present", {}, identity)
 
-    assert result == {"status": "waiting_for_login"}
+    assert result == {"status": "waiting_for_handoff"}
     assert page.goto_calls == []

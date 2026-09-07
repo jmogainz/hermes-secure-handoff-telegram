@@ -1,4 +1,4 @@
-"""Shared security validation for the Telegram browser-login plugin."""
+"""Shared security validation for Hermes Secure Handoff Telegram."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
-DEFAULT_MINI_APP_URL = "https://hermes-remote-web-login-telegram.vercel.app"
+DEFAULT_MINI_APP_URL = "https://hermes-secure-handoff-telegram.vercel.app"
 
 
 def validate_browser_cdp_url(raw: Any) -> Optional[str]:
