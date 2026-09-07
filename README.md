@@ -36,7 +36,7 @@ Telegram bot + Hermes gateway
 
 1. Install Hermes Agent and enable its Telegram gateway.
 2. Install Google Chrome, Chromium, Brave, or Edge.
-3. Host `web/` at an HTTPS origin controlled by this operator and this bot. Do not reuse a shared/test alias. See [`web/README.md`](web/README.md).
+3. Host `web/` at an HTTPS origin. You may use one official shared deployment for all operators, or self-host it per operator. See [`web/README.md`](web/README.md) for the tradeoff.
 4. Obtain the operator's numeric Telegram user ID from `@userinfobot` or `@get_id_bot`.
 
 ### Install the plugin
@@ -133,7 +133,9 @@ Send the Telegram bot a normal request that requires a website login. When Herme
 
 ## Hosting the Mini App
 
-`web/` is static and can be served by Vercel, GitHub Pages, Netlify, S3/CloudFront, or any equivalent HTTPS host. Use a deployment controlled by the same operator as the Telegram bot; it does not need access to the Hermes machine or bot token.
+`web/` is static and can be served by Vercel, GitHub Pages, Netlify, S3/CloudFront, or any equivalent HTTPS host. You can deploy it once as an official shared Mini App URL for all operators, or have each operator deploy their own copy. Each operator still uses a separate Telegram bot, Hermes gateway, owner ID, and dedicated Chrome profile.
+
+Shared hosting is convenient, but the domain owner is a trusted code publisher: the Mini App receives what the user types before it encrypts the submission for Hermes. Self-hosting reduces that shared-host trust and limits the blast radius of a compromised deployment.
 
 Vercel example (use a local Vercel login, or load only `VERCEL_TOKEN`; never source the complete Hermes environment):
 

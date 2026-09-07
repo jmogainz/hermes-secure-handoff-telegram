@@ -7,12 +7,16 @@ CAPTCHA checkpoints between a private Telegram bot chat and the operator's
 local Hermes browser profile. The Mini App is a transport boundary, not a
 sandbox or a general credential manager.
 
-## Required deployment boundary
+## Deployment boundary
 
-- Use a frontend deployment controlled by the same operator as the Telegram bot.
-  Do not use a shared/test alias for real credentials.
-- Use one Telegram owner, one Hermes profile, one gateway, and one dedicated
-  Chrome profile per deployment.
+- A single official HTTPS frontend deployment may serve every operator because
+  it is static and has no shared backend, bot token, account, or database.
+- The operator must choose whether to trust that shared frontend publisher. The
+  page can read what a user types before encrypting it for Hermes. Self-hosting
+  is the stronger isolation option and limits the impact of a compromised host.
+- Shared frontend hosting does **not** mean shared Telegram access. Each
+  operator needs one Telegram owner, one bot/gateway, one Hermes profile, and
+  one dedicated Chrome profile.
 - Keep Chrome DevTools Protocol on loopback (`http://127.0.0.1:9222` or another
   loopback port). Remote and websocket CDP endpoints are rejected.
 - Enter the Telegram bot token only through Hermes's gateway setup. Never put
