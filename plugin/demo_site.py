@@ -60,6 +60,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self._send(401, "<h1>Not authenticated</h1>")
             return
+        if self.path == "/checkout-frame":
+            self._send(
+                200,
+                '<label>Card number<input name="cardNumber" autocomplete="cc-number" type="text"></label>'
+                '<label>Expiration date<input name="expiry" autocomplete="cc-exp" type="text"></label>'
+                '<label>Security code<input name="cvc" autocomplete="cc-csc" type="text"></label>',
+            )
+            return
         if self.path in ("/", "/login"):
             self._send(
                 200,

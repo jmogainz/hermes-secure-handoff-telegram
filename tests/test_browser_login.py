@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from playwright.async_api import async_playwright
 
 import plugin.browser_login as browser_login
-from plugin.browser_adapters import BrowserAdapter
+from plugin.handoff_adapters import BrowserAdapter
 from plugin.browser_login import BrowserController, decrypt_submission, make_request
 from plugin.demo_site import AUTHENTICATED_MARKER, start_demo
 
@@ -373,7 +373,7 @@ async def test_identifier_then_password_mints_fresh_requests_and_reuses_page(tmp
         assert session.request["id"] == second_id
         assert await session.page.locator("h1").inner_text() == "Authenticated"
         assert len([message for message in controller.bot.sent if message.get("reply_markup")]) == 2
-        assert controller.bot.sent[-1]["text"] == "Browser login submitted."
+        assert controller.bot.sent[-1]["text"] == "Secure handoff action submitted."
     finally:
         await controller._close(identity)
         site.close()
