@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_CHANNEL: chromium
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install Python package
+        run: python -m pip install -e '.[dev]'
+      - name: Install frontend harness and browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          python -m playwright install chromium
+      - name: Python tests
+        run: python -m pytest tests/ -q -o 'addopts='
+      - name: Frontend tests
+        run: npm test
+      - name: Build release artifacts
+        run: python -m build --sdist --wheel
+      - name: Check release artifacts
+        run: python scripts/release_check.py

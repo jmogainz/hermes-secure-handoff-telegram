@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    env:
+      PLAYWRIGHT_CHANNEL: chromium
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install release tooling
+        run: python -m pip install -e '.[dev,release]'
+      - name: Install frontend harness and browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          python -m playwright install chromium
+      - name: Run release tests
+        run: |
+          python -m pytest tests/ -q -o 'addopts='
+          npm test
+      - name: Build and validate artifacts
+        run: |
+          python -m build --sdist --wheel
+          python scripts/release_check.py
+          python -m twine check dist/*
+      - name: Publish to PyPI with trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

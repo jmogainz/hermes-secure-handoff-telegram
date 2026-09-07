@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68,<81", "wheel>=0.42,<1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-telegram-browser-login"
+version = "0.2.0"
+description = "Owner-scoped encrypted Telegram Mini App handoff for Hermes browser login"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Hermes Telegram Browser Login contributors" }]
+keywords = ["hermes", "telegram", "browser", "login", "mini-app"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Chat",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
+dependencies = [
+  "cryptography>=42,<48",
+  "playwright>=1.58,<2",
+  "python-telegram-bot>=21,<23",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1,<2",
+  "pytest>=8,<10",
+  "pytest-asyncio>=0.23,<2",
+  "pyyaml>=6,<7",
+]
+release = [
+  "twine>=5,<7",
+]
+
+[project.scripts]
+telegram-browser-login = "hermes_telegram_browser_login.cli:main"
+
+[project.entry-points."hermes_agent.plugins"]
+telegram-browser-login = "hermes_telegram_browser_login:register"
+
+[tool.setuptools]
+package-dir = { hermes_telegram_browser_login = "plugin" }
+packages = ["hermes_telegram_browser_login"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+hermes_telegram_browser_login = ["plugin.yaml"]

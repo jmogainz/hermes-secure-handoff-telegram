@@ -1,0 +1,17 @@
+include README.md
+include LICENSE
+include SECURITY.md
+include CONTRIBUTING.md
+include CHANGELOG.md
+include AGENT.md
+include plugin.yaml
+recursive-include plugin *.py *.yaml
+recursive-include web *.html *.js *.css *.json *.md
+recursive-include tests *.py *.mjs *.cjs
+recursive-include docs *.md
+prune .vercel
+prune web/.vercel
+exclude CURRENT.md
+global-exclude *_REPORT.md
+global-exclude .env*
+global-exclude *.pyc
