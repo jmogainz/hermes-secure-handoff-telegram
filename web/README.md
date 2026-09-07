@@ -33,8 +33,7 @@ VERCEL_TOKEN="$VERCEL_TOKEN" vercel link --yes --project <your-project-name>
 VERCEL_TOKEN="$VERCEL_TOKEN" vercel deploy ./web --prod
 ```
 
-Use the resulting HTTPS origin as `mini_app_url` in the plugin setup wizard.
-The URL must not include a query string or fragment. A custom domain is fine.
+Use the official shared URL `https://hermes-remote-web-login-telegram.vercel.app` in the setup wizard, or pass a self-hosted URL with `--mini-app-url`. The URL must not include a query string or fragment.
 
 ## Security boundary
 

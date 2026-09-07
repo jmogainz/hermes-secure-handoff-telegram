@@ -19,9 +19,9 @@ from urllib.request import urlopen
 from urllib.parse import urlsplit
 
 try:
-    from .config import DEFAULT_CDP_URL, validate_browser_cdp_url
+    from .config import DEFAULT_CDP_URL, DEFAULT_MINI_APP_URL, validate_browser_cdp_url
 except ImportError:  # Standalone Hermes plugin loader path.
-    from config import DEFAULT_CDP_URL, validate_browser_cdp_url
+    from config import DEFAULT_CDP_URL, DEFAULT_MINI_APP_URL, validate_browser_cdp_url
 
 PLUGIN_ID = "telegram-browser-login"
 
@@ -169,7 +169,9 @@ def _enable_plugin() -> None:
 def setup(args: argparse.Namespace) -> int:
     _require_hermes()
 
-    mini_app_url = args.mini_app_url or _prompt("HTTPS Mini App URL: ")
+    mini_app_url = args.mini_app_url or DEFAULT_MINI_APP_URL
+    if not args.mini_app_url:
+        print(f"Using official shared Mini App: {mini_app_url}")
     try:
         mini_app_url = _validate_mini_app_url(mini_app_url)
     except ValueError as exc:
@@ -262,7 +264,10 @@ def build_parser() -> argparse.ArgumentParser:
         "setup",
         help="configure the plugin and optionally run Hermes Telegram setup",
     )
-    setup_parser.add_argument("--mini-app-url", help="HTTPS URL hosting the static Mini App")
+    setup_parser.add_argument(
+        "--mini-app-url",
+        help=f"HTTPS Mini App URL (default: {DEFAULT_MINI_APP_URL}; pass a self-hosted URL to override)",
+    )
     setup_parser.add_argument(
         "--user-id",
         action="append",

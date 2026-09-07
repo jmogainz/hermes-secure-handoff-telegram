@@ -80,6 +80,31 @@ def test_browser_controller_fails_closed_for_invalid_runtime_settings():
         controller._configured_cdp_url()
 
 
+def test_setup_uses_official_shared_mini_app_by_default(monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/local/bin/hermes")
+    monkeypatch.setattr(cli, "_read_plugin_config", lambda key: {
+        "mini_app_url": cli.DEFAULT_MINI_APP_URL,
+        "allowed_user_ids": [7],
+        "browser_cdp_url": cli.DEFAULT_CDP_URL,
+    }[key])
+
+    def fake_run(command, *, check=True, capture=False):
+        calls.append(list(command))
+        return CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+    args = cli.build_parser().parse_args([
+        "setup", "--user-id", "7", "--skip-gateway", "--skip-browser", "--no-restart",
+    ])
+    assert cli.setup(args) == 0
+    assert [
+        "hermes", "config", "set", "--force",
+        "plugins.entries.telegram-browser-login.settings.mini_app_url",
+        cli.DEFAULT_MINI_APP_URL,
+    ] in calls
+
+
 def test_setup_writes_namespaced_settings_and_verifies_them(monkeypatch, capsys):
     calls: list[list[str]] = []
 

@@ -48,7 +48,6 @@ hermes plugins install <owner>/<repository> \
   --ref <40-character-commit-sha> --enable
 cd ~/.hermes/plugins/telegram-browser-login
 python -m plugin.cli setup \
-  --mini-app-url https://your-mini-app.example \
   --user-id 123456789
 ```
 
@@ -69,6 +68,21 @@ python -m pip install \
 ```
 
 ### Run the setup wizard
+
+The published build uses the official shared Mini App automatically:
+
+```bash
+telegram-browser-login setup \
+  --user-id 123456789
+```
+
+The default Mini App is:
+
+```text
+https://hermes-remote-web-login-telegram.vercel.app
+```
+
+For a self-hosted frontend, override that default explicitly:
 
 ```bash
 telegram-browser-login setup \
@@ -97,7 +111,6 @@ For CI or a staged machine image, skip interactive gateway setup and runtime che
 
 ```bash
 telegram-browser-login setup \
-  --mini-app-url https://your-mini-app.example \
   --user-id 123456789 \
   --skip-gateway --skip-browser --no-restart
 ```
@@ -144,7 +157,7 @@ vercel link --yes --project <your-project-name>
 VERCEL_TOKEN="$VERCEL_TOKEN" vercel deploy ./web --prod
 ```
 
-Use only the resulting HTTPS origin as `--mini-app-url`; do not include a query string or fragment. See [`web/README.md`](web/README.md) for the static-hosting boundary.
+Use the official shared URL `https://hermes-remote-web-login-telegram.vercel.app` unless you intentionally self-host a copy. The URL must not include a query string or fragment. See [`web/README.md`](web/README.md) for the shared-host trust tradeoff.
 
 ## Development and release checks
 

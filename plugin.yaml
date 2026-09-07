@@ -15,8 +15,9 @@ python_dependencies:
 config_schema:
   mini_app_url:
     type: str
-    required: true
-    description: "HTTPS origin hosting the Telegram Mini App"
+    required: false
+    default: "https://hermes-remote-web-login-telegram.vercel.app"
+    description: "HTTPS origin hosting the Telegram Mini App; the official shared URL is the default"
   allowed_user_ids:
     type: list
     required: true
