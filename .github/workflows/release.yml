@@ -31,6 +31,27 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
           python -m playwright install chromium
+      - name: Start loopback CDP browser
+        run: |
+          chrome_path="$(python -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+          "$chrome_path" \
+            --headless=new \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
+            --user-data-dir="$RUNNER_TEMP/hermes-chrome-cdp" \
+            --no-first-run \
+            --no-default-browser-check \
+            about:blank >/tmp/hermes-chrome-cdp.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:9222/json/version >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          python -c 'from pathlib import Path; print(Path("/tmp/hermes-chrome-cdp.log").read_text())'
+          exit 1
       - name: Run release tests
         run: |
           python -m pytest tests/ -q -o 'addopts='
