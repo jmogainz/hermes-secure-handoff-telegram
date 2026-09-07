@@ -38,6 +38,11 @@ release = [
   "twine>=5,<7",
 ]
 
+[project.urls]
+Homepage = "https://github.com/jmogainz/hermes-remote-web-login-telegram"
+Repository = "https://github.com/jmogainz/hermes-remote-web-login-telegram"
+Issues = "https://github.com/jmogainz/hermes-remote-web-login-telegram/issues"
+
 [project.scripts]
 telegram-browser-login = "hermes_telegram_browser_login.cli:main"
 

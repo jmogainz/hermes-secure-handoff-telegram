@@ -44,14 +44,15 @@ Telegram bot + Hermes gateway
 For a published repository, use Hermes's native plugin installer:
 
 ```bash
-hermes plugins install <owner>/<repository> \
-  --ref <40-character-commit-sha> --enable
+hermes plugins install jmogainz/hermes-remote-web-login-telegram --enable
 cd ~/.hermes/plugins/telegram-browser-login
 python -m plugin.cli setup \
   --user-id 123456789
 ```
 
-For a published Python package, install it into the same Python environment that runs Hermes:
+For a reproducible install, add `--ref <40-character-commit-sha>` to pin the
+repository to a reviewed commit. The default `setup` command uses the official
+shared Mini App at `https://hermes-remote-web-login-telegram.vercel.app`.
 
 ```bash
 python -m pip install hermes-telegram-browser-login==0.2.0
