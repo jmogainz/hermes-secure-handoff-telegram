@@ -52,70 +52,82 @@
     },
   };
 
+  function resolveStageCopy(stage) {
+    if (stage && stageCopy[stage]) {
+      return stageCopy[stage];
+    }
+    if (stage) {
+      const words = stage
+        .split(/[_-]+/)
+        .filter(Boolean)
+        .map((w) => (w.length <= 3 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()))
+        .join(' ');
+      return {
+        title: `Enter ${words}`,
+        message: 'Entries are encrypted locally before transmission.',
+      };
+    }
+    return {
+      title: 'Enter credentials',
+      message: 'Entries are encrypted locally before transmission.',
+    };
+  }
+
   const views = {
     loading: {
       kicker: 'Preparing secure check',
       title: 'Check your Telegram connection',
       message: 'Loading the one-time connection test.',
-      secondary: 'No account details are requested or stored here.',
     },
     ready: {
       kicker: 'Ready to verify',
       title: 'Check your Telegram connection',
-      message: 'Send a fixed test marker through this Telegram window. Your chat will receive the result.',
-      secondary: 'The result is confirmed in your private Telegram chat.',
+      message: 'Send a fixed test marker through this Telegram window.',
     },
     sending: {
       kicker: 'Sending…',
       title: 'Connection test in progress',
       message: 'Sending the fixed test marker through Telegram. Telegram will close this window automatically.',
-      secondary: 'You will see the service confirmation in the Telegram chat.',
     },
     sendFailed: {
       kicker: 'Telegram could not send it',
       title: 'Try the connection test again',
       message: 'Telegram did not accept this test right now. Reopen the link from the chat and try once more.',
-      secondary: 'No password or credential was requested.',
     },
     missing: {
       kicker: 'Can’t open this test',
       title: 'This link is missing',
       message: 'Open the connection test from the Telegram message again. This page needs its one-time request marker.',
-      secondary: 'Ask Telegram for a fresh connection test link.',
     },
     outside: {
       kicker: 'Telegram is required',
       title: 'Open this in Telegram',
       message: 'This connection test only runs from a Telegram keyboard button. Return to the chat and tap “Open connection test”.',
-      secondary: 'A normal browser tab cannot send Telegram Mini App data.',
     },
     expired: {
       kicker: 'This request is no longer active',
       title: 'The link has expired',
       message: 'For your safety, connection test links work only briefly. Return to Telegram and request a fresh link.',
-      secondary: 'No data was sent.',
     },
     invalid: {
       kicker: 'Can’t verify this link',
       title: 'This link is not valid',
       message: 'The connection request is incomplete or malformed. Return to Telegram and request a fresh link.',
-      secondary: 'No data was sent.',
     },
     unsupported: {
       kicker: 'Telegram is unavailable',
       title: 'This Telegram view is unsupported',
       message: 'Open the connection test using the Telegram keyboard button on an up-to-date Telegram app.',
-      secondary: 'No data was sent.',
     },
     v2Ready: {
-      kicker: 'Ready to submit', title: 'Enter details for this browser',
-      message: 'Your entries are encrypted in this page before Telegram receives them.',
-      secondary: 'Your Mac decrypts the submission and fills this browser.',
+      kicker: 'Ready to submit',
+      title: 'Enter credentials',
+      message: 'Entries are encrypted locally before transmission.',
     },
     v2Sending: {
-      kicker: 'Submitting…', title: 'Sending encrypted details',
+      kicker: 'Submitting…',
+      title: 'Sending encrypted details',
       message: 'Telegram is sending the encrypted submission to the browser.',
-      secondary: 'This page does not keep a copy of what you entered.',
     },
   };
 
@@ -127,10 +139,13 @@
   }
 
   function render(viewName) {
-    const view = viewName === 'v2Ready' && state.request?.stage && stageCopy[state.request.stage]
-      ? { ...views[viewName], ...stageCopy[state.request.stage] }
-      : views[viewName];
+    let view = views[viewName];
     if (!view) return;
+
+    if (viewName === 'v2Ready') {
+      const stageInfo = resolveStageCopy(state.request?.stage);
+      view = { ...view, ...stageInfo };
+    }
 
     const isError = ['missing', 'outside', 'expired', 'invalid', 'unsupported'].includes(viewName);
     const isRetry = viewName === 'sendFailed';
@@ -139,20 +154,28 @@
     const showButton = viewName === 'ready' || isRetry || viewName === 'v2Ready';
 
     dom.card.dataset.state = isError ? 'error' : isRetry ? 'send-failed' : viewName;
-    dom.kicker.textContent = view.kicker;
+    if (dom.kicker) dom.kicker.textContent = view.kicker;
     dom.title.textContent = view.title;
     dom.message.textContent = view.message;
-    dom.secondary.textContent = view.secondary;
+    if (dom.secondary) dom.secondary.textContent = view.secondary || '';
     dom.sendButton.hidden = !showButton && !isSending;
     dom.sendButton.disabled = isSending;
-    dom.sendButton.querySelector('span').textContent = isV2
+    const buttonText = isV2
       ? (isSending ? 'Submitting…' : 'Submit to browser')
       : (isRetry ? 'Try again' : isSending ? 'Sending…' : 'Send test');
+    const span = dom.sendButton.querySelector('span');
+    if (span) {
+      span.textContent = buttonText;
+    } else {
+      dom.sendButton.textContent = buttonText;
+    }
     dom.sendButton.setAttribute('aria-label', isV2
       ? (isSending ? 'Submitting to browser' : 'Submit to browser')
       : (isRetry ? 'Try the connection test again' : isSending ? 'Sending the connection test' : 'Send the connection test'));
-    dom.privacyNote.setAttribute('data-state', isError || isRetry ? 'error' : 'default');
-    if (isV2 && viewName === 'v2Ready') dom.privacyNote.textContent = 'Encrypted locally in this page. Telegram receives only the encrypted submission.';
+    if (dom.privacyNote) {
+      dom.privacyNote.setAttribute('data-state', isError || isRetry ? 'error' : 'default');
+      if (isV2 && viewName === 'v2Ready') dom.privacyNote.textContent = 'Encrypted locally in this page. Telegram receives only the encrypted submission.';
+    }
     dom.details.hidden = !isV2 || ['missing', 'outside', 'expired', 'invalid', 'unsupported'].includes(viewName);
   }
 
