@@ -32,14 +32,48 @@ general credential manager or payment processor.
 - Never paste website credentials or one-time codes into Telegram chat, model
   prompts, terminals, logs, receipts, screenshots, or issue reports.
 - Top-document checkout fields are filled only after an encrypted v3 request
-  is accepted. Final purchase execution and embedded/cross-frame publication
-  are blocked in v1.1. A field-free boolean confirmation lacks bound transaction
-  terms; no claim of payment authorization or completion follows from field fill.
+  is accepted. Ordinary checkout remains fill-only. The observed-action path
+  permits one final click only after an owner-approved source lease, runtime-issued
+  facts, a fresh encrypted approval capability and synchronous exact-state checks.
+  Embedded/cross-frame publication remains blocked in v1.1. A field-free boolean
+  confirmation lacks bound transaction terms; field fill never authorizes payment.
 - CAPTCHA, 3DS, MFA, passkeys, provider security screens, and payment outcomes
   remain user/provider-owned. The plugin never solves or bypasses them.
 - The Mini App uses standard iOS `autocomplete` metadata, but Apple Passwords
   and payment autofill remain scoped to the Mini App's own origin. A target
   website origin cannot override that browser rule.
+
+## Composed ENTRY candidate
+
+Composition exposes only opaque field refs, supported kind, required status and
+ordinal; no current values or arbitrary destination text. The agent may select
+optional fields and arrange finite headings/layouts but cannot omit required
+fields, inject values, or grant a purchase click. Generic field/option labels
+are runtime-owned. Original private browser mutation order is independent of
+visual order. The launch fragment is public metadata; only submitted values
+are encrypted. No new relay or device pairing is introduced.
+
+The local observed-action candidate connects actual trusted public-fact registries
+to ref-only controller tools, explicit Mini App acknowledgment, encrypted exact
+approval and one guarded click. A private local source issuer now joins explicitly
+selected source refs to composed entry; ordinary ENTRY does not imply purchase
+intent. The production issuer requires an encrypted owner source-selection
+approval for an exact retained public, nonpersonal product page. It publishes
+only fixed copy, exact HTTPS origin and runtime tab ordinal, with no entry values
+or page text. The owner must review the original browser page; ambiguous,
+private, billing and account sources must not be approved. A grant cannot
+certify privacy or financial truth or relax strict private/control exclusions. See [acquisition boundaries](docs/purchase-acquisition.md). See the [source trust boundary,
+API and limits](docs/observed-purchase-status.md). An exact match to arbitrary
+checkout text is not provenance. Trusted callers must exclude sensitive personal
+sources and known unsupported/contradictory obligations before publication.
+
+The approval launch fragment is public metadata, not encrypted summary delivery.
+Only submitted approval is encrypted. Runtime-issued capabilities bind sealed
+facts, warning version and original action; the model cannot provide selectors,
+values or an approval. Scope mutation/input/change epochs and final private state
+are checked synchronously before consuming and clicking. These checks do not
+certify merchant charges or legal completeness. Cancellation cannot undo a
+committed click. Synthetic integration is not a live deployment/security approval.
 
 ## Reporting
 

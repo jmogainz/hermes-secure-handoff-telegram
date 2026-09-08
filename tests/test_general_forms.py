@@ -301,7 +301,7 @@ def test_duplicate_select_option_ids_rejected_before_publication():
 
 def test_schema_exposes_explicit_form_mode():
     from plugin.secure_handoff import SCHEMA
-    assert SCHEMA['parameters']['properties']['mode']['enum'] == ['form']
+    assert SCHEMA['parameters']['properties']['mode']['enum'] == ['form', 'compose']
 
 
 @pytest.mark.asyncio

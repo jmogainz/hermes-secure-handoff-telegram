@@ -9,6 +9,9 @@
   const MAX_TTL_MS = 10 * 60 * 1000;
   const CLOCK_SKEW_MS = 30 * 1000;
   const MAX_FIELDS = 24;
+  // Same purchase display policy as purchase_facts._LEAF; shared regression vectors.
+  // Reject, never normalize authoritative identity. Natural RTL letters remain valid.
+  const UNSAFE_PURCHASE_DISPLAY = /[\p{Cc}\p{Cf}\p{Cs}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]/u;
   const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
   const FIELD_TYPES = new Set(['text', 'email', 'tel', 'number', 'password', 'otp', 'card_number', 'card_expiry', 'cvc', 'select', 'textarea', 'checkbox', 'date', 'time', 'datetime-local', 'month', 'week', 'url', 'search', 'color', 'range']);
   const PRIVATE_JWK_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth'];
@@ -166,6 +169,8 @@
         ? { title: 'Fill browser fields', message: 'Fills the selected browser fields without clicking Submit. Entries are encrypted locally.' }
         : resolveStageCopy(state.request?.stage);
       view = { ...view, ...stageInfo, kicker: { form: 'Fill only', auth: 'Secure sign-in', checkout: 'Checkout details' }[state.request?.mode] || view.kicker };
+      if (state.request?.mode === 'purchase_approval') view = { kicker: 'Explicit purchase approval', title: 'Review purchase', message: 'Complete purchase authorizes one bound checkout action. Review the selected facts and limitations. This does not prove payment or ownership; provider verification is required.' };
+      if (state.request?.mode === 'source_approval') view = { kicker: 'Source selection only', title: 'Review selected source', message: 'Review the exact product page in the original browser. Allow only a public, nonpersonal product page suitable for selected purchase metadata. This does not authorize a purchase or certify privacy, price, or financial terms.' };
       if (state.request?.mode === 'checkout') view.message = 'Send the requested details securely. This does not authorize a purchase. Complete any payment yourself in the browser.';
     }
 
@@ -183,7 +188,9 @@
     dom.message.textContent = view.message;
     if (dom.secondary) dom.secondary.textContent = view.secondary || '';
     dom.sendButton.hidden = !showButton && !isSending;
-    dom.sendButton.disabled = isSending || isError || isBlocked || state.closed;
+    dom.sendButton.disabled = isSending || isError || isBlocked || state.closed ||
+      (state.request?.transaction?.contract === 'observed_action_v1' && !document.getElementById('purchase-acknowledgment')?.checked) ||
+      (state.request?.mode === 'source_approval' && !document.getElementById('source-acknowledgment')?.checked);
     dom.form.setAttribute('aria-busy', String(isSending));
     if (isError || isRetry || isBlocked) clearPlaintext();
     if (isError) { state.closed = true; state.publicKey = null; clearTimeout(state.expiryTimer); }
@@ -336,16 +343,43 @@
   }
 
   function validateV3Request(request) {
-    const allowedKeys = new Set(['v', 'id', 'expiresAt', 'publicKey', 'origin', 'mode', 'actionLabel', 'fields', 'stage', 'provider', 'demo']);
+    const allowedKeys = new Set(['v', 'id', 'expiresAt', 'publicKey', 'origin', 'mode', 'actionLabel', 'fields', 'stage', 'provider', 'demo', 'transaction', 'composition', 'source']);
     if (Object.keys(request).some(key => !allowedKeys.has(key))) throw new RequestError('invalid');
     let origin;
     try { origin = new URL(request.origin); } catch { throw new RequestError('invalid'); }
     if (origin.protocol !== 'https:' || origin.origin !== request.origin || origin.username || origin.password || origin.search || origin.hash) throw new RequestError('invalid');
-    if (!['auth', 'checkout', 'payment_confirmation', 'form'].includes(request.mode)) throw new RequestError('invalid');
+    if (!['auth', 'checkout', 'payment_confirmation', 'purchase_approval', 'source_approval', 'form'].includes(request.mode)) throw new RequestError('invalid');
     if (typeof request.actionLabel !== 'string' || !request.actionLabel.trim() || request.actionLabel.length > 80 || /[\x00-\x1f\x7f]/.test(request.actionLabel)) throw new RequestError('invalid');
     if (request.mode === 'form' && request.actionLabel !== 'Fill fields') throw new RequestError('invalid');
     if (!Array.isArray(request.fields) || request.fields.length > MAX_FIELDS) throw new RequestError('invalid');
-    if (request.mode === 'payment_confirmation' ? request.fields.length !== 0 : request.fields.length < 1) throw new RequestError('invalid');
+    if (['payment_confirmation', 'purchase_approval', 'source_approval'].includes(request.mode) ? request.fields.length !== 0 : request.fields.length < 1) throw new RequestError('invalid');
+    if (request.mode === 'source_approval') {
+      const source=request.source;
+      const keys=['v','id','expiresAt','publicKey','origin','mode','actionLabel','fields','stage','provider','demo','source'];
+      if (Object.keys(request).length!==keys.length || keys.some(k=>!Object.hasOwn(request,k)) ||
+          request.stage!=='source_approval' || request.provider!=='generic' || request.demo!==false ||
+          request.actionLabel!=='Allow selected source' || !source || Array.isArray(source) ||
+          Object.keys(source).length!==2 || typeof source.nonce!=='string' || !/^sg_[A-Za-z0-9_-]{32}$/.test(source.nonce) ||
+          !Number.isInteger(source.ordinal) || source.ordinal<1 || source.ordinal>64) throw new RequestError('invalid');
+      Object.freeze(source);
+    } else if (request.source!==undefined) throw new RequestError('invalid');
+    if (request.mode === 'purchase_approval') {
+      const t = request.transaction;
+      if (t?.contract === 'observed_action_v1') {
+        validateObservedPurchase(request);
+      } else {
+      if (t?.contract !== undefined) throw new RequestError('invalid');
+      const keys = ['item', 'merchant', 'currency', 'totalIncludingTax', 'renewal', 'terms'];
+      if (request.actionLabel !== 'Complete purchase' || request.stage !== 'purchase_approval' || !t ||
+          Object.keys(t).length !== 2 || typeof t.id !== 'string' || !/^tx_[A-Za-z0-9_-]{32}$/.test(t.id) ||
+          !t.summary || Object.keys(t.summary).length !== keys.length || keys.some(k => typeof t.summary[k] !== 'string' ||
+          !t.summary[k].trim() || t.summary[k].length > 512 || /[\x00-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/.test(t.summary[k])) ||
+          !/^[A-Z]{3}$/.test(t.summary.currency) || !/^(0|[1-9][0-9]{0,8})\.[0-9]{2}$/.test(t.summary.totalIncludingTax)) throw new RequestError('invalid');
+      const recurring = new RegExp('^Renews (daily|weekly|monthly|annually) at ' + t.summary.currency + ' (0|[1-9][0-9]{0,8})\\.[0-9]{2} including tax; cancel before renewal\\.$');
+      if (t.summary.renewal !== 'No renewal. One-time purchase.' && !recurring.test(t.summary.renewal)) throw new RequestError('invalid');
+      Object.freeze(t.summary); Object.freeze(t);
+      }
+    } else if (request.transaction !== undefined) throw new RequestError('invalid');
     const safeToken = /^[A-Za-z0-9_-]{1,64}$/;
     if (request.stage !== undefined && (typeof request.stage !== 'string' || !safeToken.test(request.stage))) throw new RequestError('invalid');
     if (request.provider !== undefined && (typeof request.provider !== 'string' || !safeToken.test(request.provider))) throw new RequestError('invalid');
@@ -376,7 +410,54 @@
       }
       ids.add(field.id);
     }
+    if (request.composition !== undefined) {
+      const c = request.composition;
+      const titles = ['details','contact','address','payment','other'];
+      if (request.mode !== 'form' || !c || Object.keys(c).length !== 2 ||
+          !['stack','sections'].includes(c.layout) || !Array.isArray(c.groups) || c.groups.length < 1 || c.groups.length > 8) throw new RequestError('invalid');
+      const visualIds = [];
+      for (const group of c.groups) {
+        if (!group || Object.keys(group).length !== 2 || !titles.includes(group.title) ||
+            !Array.isArray(group.fields) || group.fields.length < 1 || group.fields.length > MAX_FIELDS ||
+            group.fields.some(id => !ids.has(id))) throw new RequestError('invalid');
+        visualIds.push(...group.fields);
+      }
+      if (visualIds.length !== ids.size || new Set(visualIds).size !== ids.size ||
+          request.fields.some(f => ['checkbox','range','color'].includes(f.type) || f.selectionMode)) throw new RequestError('invalid');
+    }
     if (typeof request.demo !== 'boolean') throw new RequestError('invalid');
+  }
+
+  function validateObservedPurchase(request) {
+    const t=request.transaction;
+    const exact=(o,keys)=>o && typeof o==='object' && !Array.isArray(o) && Object.keys(o).length===keys.length && keys.every(k=>Object.hasOwn(o,k));
+    const ref=(s,p)=>typeof s==='string' && new RegExp('^'+p+'[A-Za-z0-9_-]{32}$').test(s);
+    if(request.actionLabel!=='Complete purchase' || request.stage!=='purchase_approval' ||
+       !exact(t,['contract','revision','facts','action','coverage','id','warningVersion']) ||
+       !ref(t.id,'tx_') || !ref(t.revision,'pr_') || t.coverage!=='selected_facts_only' ||
+       t.warningVersion!=='unresolved_terms_v1' || !exact(t.action,['ref','role','label']) ||
+       !ref(t.action.ref,'pa_') || t.action.role!=='purchase_action' || t.action.label!=='Bound purchase action' ||
+       !Array.isArray(t.facts) || t.facts.length<2 || t.facts.length>23) throw new RequestError('invalid');
+    const roles=[], refs=new Set(), currencies=new Set();
+    const precision={USD:2,EUR:2,GBP:2,CAD:2,AUD:2,NZD:2,JPY:0,KWD:3};
+    for(const f of t.facts) {
+      if(!f || !ref(f.ref,'pf_') || refs.has(f.ref)) throw new RequestError('invalid');
+      refs.add(f.ref); roles.push(f.role);
+      if(f.role==='item') {
+        if(!exact(f,['ref','role','value','provenance']) || f.provenance!=='public_product_matched' ||
+           typeof f.value!=='string' || !f.value || f.value.length>160 || f.value!==f.value.trim() || UNSAFE_PURCHASE_DISPLAY.test(f.value)) throw new RequestError('invalid');
+      } else {
+        if(!['displayed_total','subtotal','tax','fee','discount'].includes(f.role) ||
+           !exact(f,['ref','role','amount','currency','provenance']) || f.provenance!=='checkout_observation' ||
+           !Object.hasOwn(precision,f.currency) || typeof f.amount!=='string') throw new RequestError('invalid');
+        const digits=precision[f.currency];
+        if(!new RegExp('^(0|[1-9][0-9]{0,8})'+(digits?'\\.[0-9]{'+digits+'}':'')+'$').test(f.amount)) throw new RequestError('invalid');
+        currencies.add(f.currency);
+      }
+      Object.freeze(f);
+    }
+    if(roles.filter(r=>r==='item').length!==1 || roles.filter(r=>r==='displayed_total').length!==1 || currencies.size!==1) throw new RequestError('invalid');
+    Object.freeze(t.facts); Object.freeze(t.action); Object.freeze(t);
   }
 
   function defaultFieldAttributes(field, request) {
@@ -405,8 +486,62 @@
     dom.fields.replaceChildren();
     dom.fieldCount.textContent = `${request.fields.length} ${request.fields.length === 1 ? 'field' : 'fields'}`;
     dom.fieldGroup.hidden = request.mode === 'payment_confirmation';
+    if (request.mode === 'source_approval') {
+      dom.fieldGroup.hidden=true;
+      const note=document.createElement('p');
+      note.textContent=`Browser-context tab ${request.source.ordinal} at ${request.origin}. The ordinal is the runtime browser-context list position, not a page title or a guarantee of visual tab order. Review the exact page in the original browser; if you cannot identify it unambiguously, cancel. Do not allow account, billing, checkout, or personal pages. Only the restricted product-name source may be used; this is not permission to expose private data.`;
+      const label=document.createElement('label'),ack=document.createElement('input');
+      ack.type='checkbox';ack.id='source-acknowledgment';ack.checked=false;
+      label.append(ack,document.createTextNode(' I reviewed this exact source in the original browser and select it as a public, nonpersonal product page suitable for selected purchase metadata. No purchase is authorized.'));
+      dom.details.append(note,label);
+      ack.addEventListener('change',()=>{dom.sendButton.disabled=!ack.checked || state.closed || state.sending;});
+      return;
+    }
+    if (request.mode === 'purchase_approval') {
+      dom.fieldGroup.hidden = true;
+      const summary = document.createElement('dl');
+      summary.id = 'transaction-summary';
+      if (request.transaction.contract === 'observed_action_v1') {
+        const labels={item:'Item',displayed_total:'Displayed checkout total',subtotal:'Subtotal',tax:'Tax',fee:'Fee',discount:'Discount'};
+        const row=(label,value)=>{const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=value;summary.append(dt,dd);};
+        row('Website',request.origin);
+        for(const f of request.transaction.facts) row(labels[f.role],f.role==='item'?f.value:f.currency+' '+f.amount);
+        row('Renewal','Not established from the selected facts');
+        row('Other terms','Only selected facts are shown. The full contract has not been reviewed here.');
+        row('Payment method','Uses the payment method currently selected on the website; details are not shown here.');
+        row('Authorization','One click on this checkout’s Bound purchase action. It may charge you or start a subscription. This does not guarantee the merchant’s final charge or that every term appears here.');
+        dom.details.append(summary);
+        const label=document.createElement('label'),ack=document.createElement('input');
+        ack.type='checkbox';ack.id='purchase-acknowledgment';ack.checked=false;
+        label.append(ack,document.createTextNode(' I understand the unresolved terms shown above and want to submit this checkout.'));
+        dom.details.append(label);
+        ack.addEventListener('change',()=>{dom.sendButton.disabled=!ack.checked || state.closed || state.sending;});
+        return;
+      }
+      const labels = { item: 'Item / domain', merchant: 'Merchant', currency: 'Currency', totalIncludingTax: 'Total including tax', renewal: 'Renewal / recurrence', terms: 'Terms' };
+      for (const [key, label] of Object.entries(labels)) {
+        const dt = document.createElement('dt'), dd = document.createElement('dd');
+        dt.textContent = label; dd.textContent = request.transaction.summary[key];
+        summary.append(dt, dd);
+      }
+      dom.details.append(summary);
+      return;
+    }
     if (request.v === 3 && request.mode === 'payment_confirmation') return;
-    for (const field of request.fields) {
+    const containers = new Map();
+    let visualFields = request.fields;
+    if (request.composition) {
+      dom.fields.dataset.compositionLayout = request.composition.layout;
+      const names = {details:'Details',contact:'Contact',address:'Address',payment:'Payment',other:'Other'};
+      for (const group of request.composition.groups) {
+        const section = document.createElement('section'); section.className = 'composition-group';
+        const heading = document.createElement('h3'); heading.textContent = names[group.title];
+        section.appendChild(heading); dom.fields.appendChild(section);
+        for (const id of group.fields) containers.set(id,section);
+      }
+      visualFields = request.composition.groups.flatMap(g => g.fields.map(id => request.fields.find(f => f.id === id)));
+    }
+    for (const field of visualFields) {
       const wrapper = document.createElement('div'); wrapper.className = 'field-row';
       const label = document.createElement('label'); label.textContent = field.label; label.htmlFor = `field-${field.id}`;
       if (field.required) { const required = document.createElement('span'); required.textContent = 'Required'; required.className = 'required-mark'; label.appendChild(required); }
@@ -454,7 +589,7 @@
       if (request.demo && field.type === 'text') { const hint = document.createElement('small'); hint.textContent = 'Demo example: demo'; wrapper.appendChild(hint); }
       if (request.demo && field.type === 'password') { const hint = document.createElement('small'); hint.textContent = 'Demo example: demo-pass'; wrapper.appendChild(hint); }
       if (searchSelect) { const hint = document.createElement('small'); hint.textContent = 'Type the option label exactly as it appears in the browser.'; wrapper.appendChild(hint); }
-      dom.fields.appendChild(wrapper);
+      (containers.get(field.id) || dom.fields).appendChild(wrapper);
     }
   }
 
@@ -601,8 +736,10 @@
     }
   }
 
-  async function sendSecure() {
+  async function sendSecure(denySource = false) {
     if (state.closed || state.sending || state.request.mode === 'payment_confirmation') return;
+    if (state.request.transaction?.contract === 'observed_action_v1' && !document.getElementById('purchase-acknowledgment')?.checked) return;
+    if (state.request.mode === 'source_approval' && !denySource && !document.getElementById('source-acknowledgment')?.checked) return;
     const values = {};
     const controls = [];
     for (const field of state.request.fields) {
@@ -627,7 +764,7 @@
     let plainBytes;
     let rawKeyBytes;
     try {
-      plainBytes = new TextEncoder().encode(JSON.stringify({ values }));
+      plainBytes = new TextEncoder().encode(JSON.stringify(state.request.mode === 'source_approval' ? (denySource ? { deny: state.request.source.nonce } : { grant: state.request.source.nonce }) : state.request.mode === 'purchase_approval' ? { approve: state.request.transaction.id } : { values }));
       for (const id of Object.keys(values)) delete values[id];
       clearPlaintext();
       state.buffers.add(plainBytes);
@@ -659,7 +796,11 @@
     } catch (error) {
       if (!state.closed) {
         state.sending = false;
-        render(error instanceof RequestError && views[error.code] ? error.code : 'sendFailed');
+        if (state.request.mode === 'purchase_approval') {
+          state.closed = true; state.publicKey = null; clearTimeout(state.expiryTimer);
+          render('sendFailed');
+          dom.message.textContent = 'Purchase submission could not be confirmed. Do not retry; verify the provider result first.';
+        } else render(error instanceof RequestError && views[error.code] ? error.code : 'sendFailed');
       }
     } finally {
       for (const id of Object.keys(values)) delete values[id];
@@ -717,6 +858,7 @@
     render('cancelled');
   }
   dom.cancelButton.addEventListener('click', () => {
+    if (state.request?.mode === 'source_approval') { void sendSecure(true); return; }
     closeRequest();
     try { state.telegram?.close?.(); } catch { /* Closing is best-effort; plaintext is already cleared. */ }
   });

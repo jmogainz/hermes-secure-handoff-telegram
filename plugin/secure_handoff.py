@@ -8,10 +8,12 @@ from typing import Any
 from urllib.parse import urlsplit
 
 try:
+    from . import composition
     from .handoff_adapters import PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
     from .config import DEFAULT_CDP_URL, validate_browser_cdp_url
     from .connection_check import load_runtime_config
 except ImportError:  # Standalone Hermes plugin loader path.
+    import composition
     from handoff_adapters import PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
     from config import DEFAULT_CDP_URL, validate_browser_cdp_url
     from connection_check import load_runtime_config
@@ -268,10 +270,20 @@ def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
         if not isinstance(body, dict):
             raise ValueError
 
-        if version == 3 and request.get("mode") == "payment_confirmation":
-            if set(body) != {"confirm"} or body["confirm"] is not True:
+        if version == 3 and request.get("mode") == "source_approval":
+            if set(body) not in ({"grant"}, {"deny"}): raise ValueError
+            decision=next(iter(body))
+            if type(body[decision]) is not str or body[decision] != request["source"]["nonce"]:
                 raise ValueError
-            return {"confirm": True}
+            return body
+
+        if version == 3 and request.get("mode") == "purchase_approval":
+            if set(body) != {"approve"} or body["approve"] != request["transaction"]["id"]:
+                raise ValueError
+            return {"approve": body["approve"]}
+
+        if version == 3 and request.get("mode") == "payment_confirmation":
+            raise ValueError
 
         if set(body) != {"values"} or not isinstance(body["values"], dict):
             raise ValueError
@@ -307,8 +319,36 @@ class Session:
     commit_guard: Any = field(default=None, repr=False)
     commit_slots: dict = field(default_factory=dict, repr=False)
     generation: int = 0
+    session_ref: str | None = None
+    composition_snapshot: str | None = None
+    component_ref: str | None = None
+    composition_refs: dict = field(default_factory=dict, repr=False)
+    composition_options: dict = field(default_factory=dict, repr=False)
+    composition_fields: list = field(default_factory=list, repr=False)
+    purchase_blocker: str | None = None
+    purchase_factory: Any = field(default=None, repr=False)
+    purchase_registry: Any = field(default=None, repr=False)
+    purchase_selection: Any = field(default=None, repr=False)
+    purchase_fill_completed: float = 0
+    purchase_wire: str | None = field(default=None, repr=False)
+    purchase_sources: Any = field(default=None, repr=False)
+    catalog_grants: list = field(default_factory=list, repr=False)
+    catalog_candidates: dict = field(default_factory=dict, repr=False)
+    source_pending: Any = field(default=None, repr=False)
+    source_entry: Any = field(default=None, repr=False)
 
-class SecureHandoffController:
+try:
+    from .observed_purchase import ObservedPurchaseMixin
+    from . import observed_purchase
+    from .purchase_sources import PurchaseAcquisitionMixin
+    from . import purchase_sources
+except ImportError:  # Standalone directory loader.
+    from observed_purchase import ObservedPurchaseMixin
+    import observed_purchase
+    from purchase_sources import PurchaseAcquisitionMixin
+    import purchase_sources
+
+class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
     def __init__(self, ctx: Any, *, browser=None, playwright=None, context=None, owns_browser=False):
         self.ctx=ctx; self.config=load_runtime_config(ctx); self.loop=None; self.bot=None; self.adapter=None; self._playwright=playwright; self._browser=browser; self._context=context; self._owns_browser=owns_browser; self._cdp_url=""; self.sessions={}; self._lock=threading.RLock(); self._acquisitions={}
     def _identity(self):
@@ -413,6 +453,13 @@ class SecureHandoffController:
             }""") is True
         except Exception: return False
     def _scrub_binding(self, s):
+        self._scrub_purchase_sources(s)
+        s.purchase_factory = None
+        s.purchase_selection = None
+        s.purchase_wire = None
+        if s.purchase_registry is not None:
+            registry, s.purchase_registry = s.purchase_registry, None
+            asyncio.get_running_loop().create_task(registry.close())
         if s.deadline:
             s.deadline.cancel()
             s.deadline = None
@@ -421,6 +468,9 @@ class SecureHandoffController:
         self._reset_binding(s)
         s.form_controls = []
         s.document = None
+        s.composition_refs.clear()
+        s.composition_options.clear()
+        s.composition_fields.clear()
 
     async def _retire_session(self, s):
         self._invalidate(s, "cancelled")
@@ -914,7 +964,8 @@ class SecureHandoffController:
         action = await s.page.evaluate("f => f.action", form) if form else s.page.url
         if action != s.form_action or _origin(action) != s.request["origin"]:
             raise ValueError("changed form action")
-        if s.request["fields"] != [{"id": key, **meta} for key, meta in s.ref_meta.items()]:
+        expected = s.composition_fields if s.requested_mode == "compose" else [{"id": key, **meta} for key, meta in s.ref_meta.items()]
+        if s.request["fields"] != expected:
             raise ValueError("changed field metadata")
         for old, live in zip(s.form_controls, controls):
             if old["metadata"] != live["metadata"] or old["field"] != live["field"]:
@@ -1011,10 +1062,7 @@ class SecureHandoffController:
             s.key = None
             s.request = None
             s.status = "cancelled"
-            self._reset_binding(s)
-            s.form_controls = []
-            s.document = None
-            if s.deadline: s.deadline.cancel(); s.deadline=None
+            self._scrub_binding(s)
             self.sessions.pop(identity, None)
             if s.wake:
                 s.wake.set()
@@ -1073,7 +1121,11 @@ class SecureHandoffController:
             if s.status not in {"cancelled","expired"}: s.status = "unsupported_stage"
             return {"status":s.status}
     async def _snapshot(self,s):
-        if s.status in {"filled", "human_action_required", "rejected", "cancelled", "expired"}:
+        if s.status == "purchase_review_ready":
+            return {"status":s.status,"session_ref":s.session_ref}
+        if s.status == "human_action_required" and s.purchase_blocker in {"public_fact_source_unavailable", "purchase_binding_unsupported"}:
+            return {"status":s.status, "url":self._safe_origin(s), "reason":s.purchase_blocker}
+        if s.status in {"filled", "human_action_required", "purchase_submitted", "outcome_unknown", "rejected", "cancelled", "expired"}:
             return {"status": s.status, "url": self._safe_origin(s)}
         if s.request and s.key and s.status in {"waiting_for_handoff", "waiting_for_confirmation"}:
             return {"status": s.status, "url": self._safe_origin(s)}
@@ -1091,10 +1143,101 @@ class SecureHandoffController:
                 return {"status":"stale_ref"}
         return {"status":"forbidden"}
 
+    async def _composition(self, action, args, ident):
+        if not composition.valid_payload(action,args): return {"status":"invalid"}
+        denied = {"status":"rejected"}
+        s = self.sessions.get(ident)
+        if not s or s.requested_mode != "compose": return denied
+        if (action == 'cancel_composition' and args['component_ref'] == s.component_ref
+                and s.component_ref and s.status == 'waiting_for_handoff'):
+            self._invalidate(s,'cancelled')
+        async with s.lock:
+            if self.sessions.get(ident) is not s: return denied
+            if action in {"composition_status", "cancel_composition"}:
+                if args['component_ref'] != s.component_ref or not s.component_ref: return denied
+                if action == 'cancel_composition' and s.status == 'cancelled':
+                    self._scrub_binding(s)
+                    if s.wake: s.wake.set()
+                return {"status":s.status, "component_ref":s.component_ref}
+            if not self._current(s): return denied
+            if action == 'discover_components':
+                if args['session_ref'] != s.session_ref or not s.session_ref: return denied
+                if s.status == 'waiting_for_handoff': return denied
+                self._scrub_binding(s)
+                s.component_ref = None
+                s.composition_snapshot = None
+                try:
+                    await self._bind_form(s)
+                    fields, refs, bindings, options = composition.project(s.ref_meta)
+                    s.composition_fields = fields
+                    s.composition_refs = bindings
+                    s.composition_options = options
+                    s.request,s.key = make_request(_origin(s.page.url),fields,mode='form',stage='general_form')
+                    s.request['expiresAt'] = int(time.time()*1000) + 120000
+                    s.status = 'composition_available'
+                    await self._pin_commit_guard(s)
+                    await self._preflight_form(s)
+                    self._assert_active(s)
+                    s.composition_snapshot = composition.mint('sn_')
+                    self._arm_deadline(s)
+                    return {"status":"composition_available", "snapshot_ref":s.composition_snapshot,
+                            "expires_at_ms":s.request['expiresAt'], "phase":"entry", "refs":refs}
+                except (Exception, asyncio.CancelledError) as error:
+                    s.status = 'rejected'
+                    self._scrub_binding(s)
+                    if isinstance(error,asyncio.CancelledError): raise
+                    return denied
+            if args['snapshot_ref'] != s.composition_snapshot or not s.composition_snapshot or s.status != 'composition_available':
+                return denied
+            try:
+                chosen, visual = composition.select_groups(args,s.composition_refs,s.ref_meta)
+            except Exception:
+                return denied
+            try:
+                await self._preflight_form(s)
+                await s.commit_guard.evaluate('g => g.check()')
+                self._assert_active(s)
+                # Keep the original native order, irrespective of visual groups.
+                s.composition_fields = [f for f in s.composition_fields if f['id'] in chosen]
+                s.request['fields'] = s.composition_fields
+                s.request['composition'] = visual
+                encoded = json.dumps(s.request,separators=(',',':')).encode('utf-8')
+                if len(encoded)>4096: raise ValueError('manifest too large')
+                s.component_ref = composition.mint('cp_')
+                # Consume snapshot before any external await. Failed/ambiguous
+                # publication is terminal; never retry a possibly delivered key.
+                s.composition_snapshot = None
+                s.composition_refs.clear()
+                from telegram import KeyboardButton,ReplyKeyboardMarkup,WebAppInfo
+                launch = self.config.mini_app_url.rstrip('/') + '#request=' + _b64(encoded)
+                markup=ReplyKeyboardMarkup([[KeyboardButton('Open secure handoff',web_app=WebAppInfo(url=launch))]],resize_keyboard=True)
+                if not await self._send(SimpleNamespace(bot=self.bot),s.chat,s.thread,'Encrypted field entry is ready. No purchase action is authorized.',markup):
+                    raise ValueError('publication failed')
+                self._assert_active(s)
+                await self._preflight_form(s)
+                await s.commit_guard.evaluate('g => g.check()')
+                self._assert_active(s)
+                s.status='waiting_for_handoff'
+                self._arm_deadline(s)
+                return {'status':s.status,'component_ref':s.component_ref}
+            except (Exception,asyncio.CancelledError) as error:
+                if s.status not in {'cancelled','expired'}: s.status='publication_failed'
+                self._scrub_binding(s)
+                if isinstance(error,asyncio.CancelledError): raise
+                return {'status':s.status}
+
     async def _run(self,action,args,ident):
-        if args.get("mode") not in {None, "form"}: return {"status":"invalid"}
+        if args.get("mode") not in {None, "form", "compose"}: return {"status":"invalid"}
+        if args.get('mode') == 'compose' and action != 'attach': return {"status":"invalid"}
         self._expire()
+        if action in purchase_sources.ACTIONS:
+            return await self._purchase_sources(action,args,ident)
+        if action in observed_purchase.ACTIONS:
+            return await getattr(self, action)(args,ident)
+        if action in composition.ACTIONS:
+            return await self._composition(action,args,ident)
         if action=="open":
+            if args.get("mode") == "compose": return {"status":"invalid"}
             lease = object(); self._acquisitions[ident] = lease
             try: _origin(args.get("url"))
             except Exception: return {"status":"invalid_url"}
@@ -1115,6 +1258,9 @@ class SecureHandoffController:
                 s=await self._attach_session(ident,origin,target_id,lease=lease)
                 s.requested_mode = args.get("mode")
                 async with s.lock:
+                    if s.requested_mode == "compose":
+                        s.session_ref = composition.mint("ss_")
+                        return {"status":"attached", "session_ref":s.session_ref}
                     await self._bind_stage(s)
                     return await self._present(s,SimpleNamespace(bot=self.bot),False)
             except _AmbiguousTarget:
@@ -1126,6 +1272,8 @@ class SecureHandoffController:
         if action=="close": return await self._close(ident)
         s=self.sessions.get(ident)
         if not s: return {"status":"unavailable", "reason":"session_missing"}
+        if s.requested_mode == "compose":
+            return {"status":s.status} if action in {"read","wait"} else {"status":"forbidden"}
         generation = s.generation
         if action=="wait":
             async with s.lock:
@@ -1141,6 +1289,8 @@ class SecureHandoffController:
             s.updated=time.monotonic()
             if action=="read": return await self._snapshot(s)
             if action=="present":
+                if s.status == "purchase_review_ready": return await self._snapshot(s)
+                if s.mode == "purchase_approval": return await self._present(s,SimpleNamespace(bot=self.bot),False)
                 s.requested_mode = args.get("mode", s.requested_mode)
                 try:
                     await self._bind_stage(s)
@@ -1154,14 +1304,21 @@ class SecureHandoffController:
     def tool(self,args=None,**kwargs):
         if args is not None and not isinstance(args, dict): return '{"status":"invalid"}'
         payload=dict(args) if isinstance(args,dict) else dict(kwargs); ident=self._identity()
-        if (set(payload) - {"action","url","origin","mode","ref","text","timeout"}
+        if not isinstance(payload.get("action"),str): return '{"status":"invalid"}'
+        if payload.get("action") in purchase_sources.ACTIONS:
+            if not purchase_sources.valid_payload(payload["action"],payload): return '{"status":"invalid"}'
+        elif payload.get("action") in observed_purchase.ACTIONS:
+            if not observed_purchase.valid_payload(payload["action"],payload): return '{"status":"invalid"}'
+        elif payload.get("action") in composition.ACTIONS:
+            if not composition.valid_payload(payload["action"],payload): return '{"status":"invalid"}'
+        elif (set(payload) - {"action","url","origin","mode","ref","text","timeout"}
             or any(not isinstance(payload[k], str) for k in ("action","url","origin","mode","ref","text") if k in payload)
             or ("timeout" in payload and (type(payload["timeout"]) is not int or not 0 <= payload["timeout"] <= 90))):
             return '{"status":"invalid"}'
         if (ident is None or len(ident) != 3 or type(ident[0]) is not int or type(ident[1]) is not int
             or ident[0] <= 0 or ident[1] != ident[0] or (ident[2] is not None and (type(ident[2]) is not int or ident[2] <= 0))
             or ident[0] not in self._owners()): result={"status":"rejected"}
-        elif payload.get("action") in {"open","attach","present","read","click","type","wait","close"}: result=self._submit(self._run(payload.get("action"),payload,ident))
+        elif payload.get("action") in {"open","attach","present","read","click","type","wait","close"} | composition.ACTIONS | observed_purchase.ACTIONS | purchase_sources.ACTIONS: result=self._submit(self._run(payload.get("action"),payload,ident))
         else: result={"status":"invalid"}
         return json.dumps(result,separators=(",",":"))
 
@@ -1181,14 +1338,71 @@ class SecureHandoffController:
         if not isinstance(uid,int) or not isinstance(cid,int) or getattr(chat,"type",None)!="private" or uid not in self._owners(): return None
         t=getattr(getattr(u,"effective_message",None),"message_thread_id",None); return uid,cid,t if isinstance(t,int) else None
     async def _present_confirmation(self,s,c,demo=False):
-        # Deliberately disabled: origin + confirm=true is not transaction consent.
-        s.status = "human_action_required"
-        s.key = None
-        return {"status":"human_action_required", "url":self._safe_origin(s)}
+        try:
+            from .purchase_approval import pin_purchase, approval_request, PublicFactSourceUnavailable
+        except ImportError:
+            from purchase_approval import pin_purchase, approval_request, PublicFactSourceUnavailable
+        s.purchase_blocker = None
+        if s.purchase_factory is not None:
+            return await self._post_fill_purchase(s)
+        try:
+            self._assert_active(s)
+            guard = await pin_purchase(s)
+        except Exception as error:
+            s.status = "human_action_required"
+            s.key = None
+            s.purchase_blocker = ("public_fact_source_unavailable" if isinstance(error, PublicFactSourceUnavailable)
+                                  else "purchase_binding_unsupported")
+            return await self._snapshot(s)
+        old_guard = s.commit_guard
+        # Take ownership before the first await so cancellation cannot orphan
+        # the newly created lease between extraction and publication.
+        s.commit_guard = guard
+        try:
+            summary = await guard.evaluate("g => g.summary")
+            self._assert_active(s)
+            s.request, s.key = approval_request(make_request, _origin(s.page.url), summary,
+                                               s.request["expiresAt"], demo)
+            s.mode = "purchase_approval"
+            s.generation += 1
+            self._arm_deadline(s)
+            return await self._publish_purchase(s,c)
+        except Exception:
+            s.status = "publication_failed"
+            self._scrub_binding(s)
+            return {"status":s.status}
+        finally:
+            # The new lease privately retains the old guard for structural checks.
+            # Dispose only the Python handle; do not revoke that underlying guard.
+            await old_guard.dispose()
+
+    async def _publish_purchase(self,s,c):
+        try:
+            self._check_observed_request(s)
+            self._assert_active(s)
+            await s.commit_guard.evaluate("g => g.check()")
+            encoded=json.dumps(s.request,separators=(",",":"),ensure_ascii=False).encode("utf-8")
+            if len(encoded)>4096: raise ValueError("manifest too large")
+            from telegram import KeyboardButton,ReplyKeyboardMarkup,WebAppInfo
+            launch=self.config.mini_app_url.rstrip("/")+"#request="+_b64(encoded)
+            markup=ReplyKeyboardMarkup([[KeyboardButton("Review purchase",web_app=WebAppInfo(url=launch))]],resize_keyboard=True)
+            if not await self._send(c,s.chat,s.thread,"Review the selected checkout facts in the Mini App. Field entry did not authorize payment.",markup): raise ValueError("publication failed")
+            self._assert_active(s)
+            await s.commit_guard.evaluate("g => g.check()")
+            s.status="waiting_for_confirmation"
+            return {"status":s.status,"url":self._safe_origin(s)}
+        except (Exception, asyncio.CancelledError) as error:
+            if s.status not in {"cancelled","expired"}: s.status="publication_failed"
+            self._scrub_binding(s)
+            if isinstance(error, asyncio.CancelledError): raise
+            return {"status":s.status}
 
     async def _present(self,s,c,demo=False):
         if not self._current(s): return {"status":s.status}
         generation = s.generation
+        if s.mode == "purchase_approval":
+            if s.status != "waiting_for_confirmation": return {"status":s.status}
+            return await self._publish_purchase(s,c)
         if s.status == "human_action_required":
             return {"status": s.status, "url": self._safe_origin(s)}
         try:
@@ -1232,6 +1446,7 @@ class SecureHandoffController:
             return {"status":s.status}
 
     async def _preflight(self,s):
+        self._check_observed_request(s)
         if s.mode == "form":
             return await self._preflight_form(s)
         if s.request["expiresAt"]<int(time.time()*1000) or _origin(s.page.url)!=s.request["origin"]: raise ValueError
@@ -1499,7 +1714,11 @@ class SecureHandoffController:
             identity=self._authorized(u)
             if not self._current(s) or not s.request or s.request["id"] != rid or not identity or identity!=(s.user,s.chat,s.thread) or rid in s.used_ids: raise ApplicationHandlerStop
             s.used_ids.add(rid)
+            if s.request.get("mode") == "source_approval":
+                await self._accept_source_approval(s, raw, c)
+                raise ApplicationHandlerStop
             phase="expiry"
+            purchase_attempted=False
             try:
                 if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
                 phase="refresh_stage"; await self._refresh_same_stage(s)
@@ -1507,7 +1726,13 @@ class SecureHandoffController:
                 phase="decrypt"; payload=decrypt_submission(raw if isinstance(raw,str) else "",s.request,s.key)
                 phase="preflight_after_decrypt"; await self._preflight(s)
                 if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
-                if s.mode == "payment_confirmation":
+                if s.mode == "purchase_approval":
+                    phase="click"
+                    self._assert_active(s)
+                    purchase_attempted=True
+                    await s.commit_guard.evaluate("(g,d) => g.commit({deadline:d})", s.request["expiresAt"])
+                    s.status="purchase_submitted"; s.key=None
+                elif s.mode == "payment_confirmation":
                     if payload.get("confirm") is not True or set(payload) != {"confirm"}: raise ValueError
                     # No final purchase execution without a bound, user-visible transaction summary.
                     s.status="human_action_required"; s.key=None
@@ -1517,12 +1742,18 @@ class SecureHandoffController:
                         if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
                         if s.mode == "form": await self._preflight_form(s)
                         value = self._resolve_search_select_value(s, field, payload[field["id"]])
+                        if s.requested_mode == "compose" and field["type"] == "select":
+                            value = s.composition_options[field["id"]][value]
                         await self._fill_bound_field(s,field,value)
                     if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
                     if s.mode == "form":
                         await self._preflight_form(s)
                         self._assert_active(s)
-                        s.status="filled"; s.key=None
+                        if s.requested_mode == "compose" and s.purchase_factory is not None:
+                            s.checkout_filled=True
+                            await self._post_fill_purchase(s)
+                        else:
+                            s.status="filled"; s.key=None
                     elif s.mode == "checkout":
                         s.checkout_filled=True
                         phase="refresh_before_confirmation"; await self._refresh_same_stage(s)
@@ -1536,15 +1767,41 @@ class SecureHandoffController:
                         phase="preflight_after_fill"; await self._preflight(s)
                         phase="click"; await self._guarded_commit(s, sum(len(v) for v in s.commit_slots.values()), click=True)
                         phase="rebind"; await self._rebind_or_finish(s,c)
+            except asyncio.CancelledError:
+                # Once dispatch starts, cancellation cannot establish whether the
+                # browser committed. Never query/retry the click to recover an ack.
+                if purchase_attempted:
+                    s.status="outcome_unknown"
+                elif s.status not in {"cancelled", "expired", "publication_failed"}:
+                    s.status="cancelled"
+                self._receipt(s,phase)
+                self._scrub_binding(s)
+                if s.wake: s.wake.set()
+                self._schedule_wake(s)
+                raise
             except Exception:
                 if s.status not in {"cancelled", "expired"}: s.status="rejected"
+                if purchase_attempted:
+                    try: consumed=await s.commit_guard.evaluate("g => g.consumed")
+                    except asyncio.CancelledError:
+                        s.status="outcome_unknown"
+                        self._receipt(s,phase)
+                        self._scrub_binding(s)
+                        if s.wake: s.wake.set()
+                        self._schedule_wake(s)
+                        raise
+                    except Exception: consumed=True
+                    if consumed: s.status="outcome_unknown"
                 s.key=None; self._receipt(s,phase)
             self._receipt(s)
-            if s.status in {"filled", "human_action_required", "submitted", "rejected", "cancelled", "expired", "publication_failed"}:
+            if s.status in {"filled", "human_action_required", "submitted", "purchase_submitted", "outcome_unknown", "rejected", "cancelled", "expired", "publication_failed"}:
                 self._scrub_binding(s)
             if s.wake: s.wake.set()
         if s.status in {"submitted","stage_submitted"}: await self._send(c,s.chat,s.thread,"Secure handoff action submitted.")
+        elif s.status=="outcome_unknown": await self._send(c,s.chat,s.thread,"Purchase outcome unknown. Do not retry; verify the provider result first.")
+        elif s.status=="purchase_submitted": await self._send(c,s.chat,s.thread,"Approved purchase action submitted; not proof of payment or ownership. Outcome unknown until provider verification.")
         elif s.status=="human_action_required": await self._send(c,s.chat,s.thread,"Checkout fields filled. Complete the final purchase directly in the provider page; no purchase action was clicked.")
+        elif s.status=="purchase_review_ready": await self._send(c,s.chat,s.thread,"Checkout facts are ready for review composition. No purchase action was clicked.")
         elif s.status=="filled": await self._send(c,s.chat,s.thread,"Secure handoff fields filled. No submit action was clicked.")
         elif s.status=="waiting_for_confirmation": await self._send(c,s.chat,s.thread,"Checkout details are ready. Review the browser page, then authorize the purchase.")
         elif s.status=="rejected": await self._send(c,s.chat,s.thread,"Secure handoff rejected.")
@@ -1562,7 +1819,9 @@ class SecureHandoffController:
             "Inspect the live browser and continue the current handoff task. "
             "If status is waiting_for_handoff, a new Mini App was published. "
             "If rejected, diagnose from receipts without reading field values. "
-            "If submitted, verify the provider's resulting state."
+            "If submitted, verify the provider's resulting state. "
+            "If purchase_submitted or outcome_unknown, this is not proof of payment or ownership. "
+            "Do not retry the purchase; verify the provider result first."
         )
     def _schedule_wake(self,s):
         if self.adapter is None or not self.loop or not self.loop.is_running(): return
@@ -1571,7 +1830,7 @@ class SecureHandoffController:
         except Exception: pass
     async def _wake_session(self,status,user,chat,thread,origin):
         adapter=self.adapter
-        if adapter is None or status not in {"submitted","filled","human_action_required","rejected","waiting_for_handoff","waiting_for_confirmation","publication_failed","stage_submitted"}: return
+        if adapter is None or status not in {"submitted","filled","human_action_required","purchase_submitted","outcome_unknown","rejected","purchase_review_ready","waiting_for_handoff","waiting_for_confirmation","publication_failed","stage_submitted","composition_available"}: return
         source=SimpleNamespace(chat_id=str(chat),user_id=str(user),thread_id=str(thread) if thread is not None else None)
         try: await self._deliver_wake(adapter,self._wake_text(status,origin),source)
         except Exception: pass
@@ -1603,6 +1862,48 @@ class SecureHandoffController:
         i=self._identity(); return self._submit(self._close(i)) if i else {"status":"unavailable"}
 
 SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"mode":{"type":"string","enum":["form"],"description":"Explicit fill-only generic form; never clicks submit."},"ref":{"type":"string","description":"Opaque Chrome target ID for attach; ordinary actions use the handoff ref returned by the tool"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90}},"required":["action"],"additionalProperties":False}}
+# Exact disjoint model payloads; identity and document authority never come from arguments.
+SCHEMA['description'] += ' For agent-shaped encrypted ENTRY, attach mode compose, discover_components, then present_composition. Choose optional fields and bounded group headings/order; required fields cannot be omitted. No purchase authority.'
+_props = SCHEMA['parameters']['properties']
+_legacy = dict(_props)
+_props['action'] = {'type':'string','enum':_props['action']['enum'] + sorted(composition.ACTIONS)}
+_props['mode'] = {'type':'string','enum':['form','compose'], 'description':'compose attaches without navigation or publication; then discover and compose encrypted fill-only ENTRY.'}
+for _key,_prefix in [('session_ref','ss_'),('snapshot_ref','sn_'),('component_ref','cp_')]:
+    _props[_key] = {'type':'string','pattern':'^'+_prefix+'[A-Za-z0-9_-]{32}$'}
+_props['layout'] = {'type':'string','enum':['stack','sections']}
+_props['groups'] = {'type':'array','minItems':1,'maxItems':8,'items':{'type':'object','additionalProperties':False,
+    'required':['title','refs'],'properties':{'title':{'type':'string','enum':sorted(composition.TITLES)},
+    'refs':{'type':'array','minItems':1,'maxItems':24,'uniqueItems':True,'items':{'type':'string','pattern':'^fr_[A-Za-z0-9_-]{32}$'}}}}}
+SCHEMA['parameters']['oneOf'] = [
+    {'properties':{'action':{'enum':_legacy['action']['enum']}},
+     'not':{'anyOf':[{'required':[k]} for k in ['session_ref','snapshot_ref','component_ref','layout','groups']]}}
+]
+for _action,_keys in [('discover_components',['session_ref']),('present_composition',['snapshot_ref','layout','groups']),
+                      ('composition_status',['component_ref']),('cancel_composition',['component_ref'])]:
+    SCHEMA['parameters']['oneOf'].append({'type':'object','additionalProperties':False,
+        'required':['action']+_keys, 'properties':{'action':{'const':_action},**{k:_props[k] for k in _keys}}})
+_props['action']['enum'] += sorted(observed_purchase.ACTIONS)
+for _key,_prefix in [('revision','pr_'),('action_ref','pa_')]:
+    _props[_key] = {'type':'string','pattern':'^'+_prefix+'[A-Za-z0-9_-]{32}$'}
+_props['fact_refs'] = {'type':'array','minItems':2,'maxItems':24,'uniqueItems':True,
+                       'items':{'type':'string','pattern':'^pf_[A-Za-z0-9_-]{32}$'}}
+SCHEMA['parameters']['oneOf'][0]['not']['anyOf'] += [{'required':[k]} for k in ['revision','fact_refs','action_ref']]
+for _action,_keys in [('inspect_purchase',['session_ref']),('compose_purchase',['session_ref','revision','fact_refs','action_ref'])]:
+    SCHEMA['parameters']['oneOf'].append({'type':'object','additionalProperties':False,
+        'required':['action']+_keys,'properties':{'action':{'const':_action},**{k:_props[k] for k in _keys}}})
+SCHEMA['description'] += ' inspect_purchase/compose_purchase select runtime-issued public fact refs only. Requires trusted post-fill public-source acquisition; unavailable without it. Separate user Complete purchase tap authorizes one bound action, not a guaranteed charge.'
+_props['action']['enum'] += sorted(purchase_sources.ACTIONS)
+_props['catalog_ref'] = {'type':'string','pattern':'^cs_[A-Za-z0-9_-]{32}$'}
+_props['source_revision'] = {'type':'string','pattern':'^ps_[A-Za-z0-9_-]{32}$'}
+_props['source_refs'] = {'type':'array','minItems':4,'maxItems':24,'uniqueItems':True,
+    'items':{'type':'string','pattern':'^sr_[A-Za-z0-9_-]{32}$'}}
+SCHEMA['parameters']['oneOf'][0]['not']['anyOf'] += [{'required':[k]} for k in ['source_revision','source_refs','catalog_ref']]
+for _action,_keys in [('discover_catalog_sources',['session_ref']),('request_source_approval',['session_ref','catalog_ref']),('discover_purchase_sources',['session_ref']),('select_purchase_sources',['session_ref','source_revision','source_refs'])]:
+    SCHEMA['parameters']['oneOf'].append({'type':'object','additionalProperties':False,
+        'required':['action']+_keys,'properties':{'action':{'const':_action},**{k:_props[k] for k in _keys}}})
+SCHEMA['description'] += ' After discover_components, discover_purchase_sources and select_purchase_sources explicitly arm composed checkout using only issued refs. First discover_catalog_sources and request_source_approval for an exact issued catalog_ref; wait for the owner encrypted Mini App grant. The owner must identify and review the original public nonpersonal product page. Source selection is not privacy certification or purchase authority; unsupported sources fail closed.'
+del _props, _legacy, _key, _prefix, _action, _keys
+
 def register(ctx):
     c=SecureHandoffController(ctx)
     if c.config is not None and len(c.config.allowed_user_ids)!=1:

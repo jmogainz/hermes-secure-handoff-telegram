@@ -86,16 +86,15 @@ checkout_details visible
   -> waiting_for_handoff
   -> encrypted registrant/billing/payment values accepted
   -> exact controls filled, no purchase click
-  -> scrub key, request and private bindings
-  -> human_action_required
-  -> user reviews exact transaction terms in the provider page
-  -> user completes final approval there
-  -> provider result verified separately
+  -> ordinary checkout: scrub key/request/bindings -> human_action_required -> user completes in provider page
+  -> source-authorized observed checkout: fresh runtime fact review -> encrypted Complete purchase approval
+  -> exact original action/document/scope revalidated synchronously -> one guarded native click
+  -> purchase_submitted or outcome_unknown -> provider result verified separately
 ```
 
 Checkout detection requires a single exact payment action plus payment semantics, supported payment fields, or a bounded multi-field billing shape. The action must stay in the same top-level origin and approved scope. Version 1.1 publishes top-document controls only; embedded payment controls are rejected pending atomic parent/child commit authorization. A same-looking replacement form never inherits old authority.
 
-The plugin never solves CAPTCHA, performs 3DS, chooses MFA/passkey options, or executes final purchases. Legacy `payment_confirmation` is blocked in both frontend and controller. A future remote purchase authorization protocol must display and bind amount, currency, merchant, recurring charges and terms; `confirm: true` alone is not enough.
+The plugin never solves CAPTCHA, performs 3DS, chooses MFA/passkey options, or claims provider payment success. Legacy `payment_confirmation` is blocked in both frontend and controller. The observed-action path is limited to an explicitly source-authorized, runtime-bound checkout and one user-approved original action; `confirm: true` alone is not enough. `purchase_submitted` is an action receipt, not payment or ownership proof, and ambiguous dispatch becomes `outcome_unknown` without retry.
 
 ## Encryption
 

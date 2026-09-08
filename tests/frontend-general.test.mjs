@@ -79,6 +79,14 @@ test('generic typed controls send only the existing encrypted v3 values envelope
 
 test('malformed or unsupported metadata is rejected before rendering controls', async () => {
   const cases = [
+    request([field('text')], {composition:{layout:'sections',groups:[{title:'details',fields:[]}]}}),
+    request([field('text')], {composition:{layout:'hidden',groups:[{title:'details',fields:['f0']}]}}),
+    request([field('text')], {composition:{layout:'stack',groups:[{title:'<script>bad</script>',fields:['f0']}]}}),
+    request([field('text')], {composition:{layout:'stack',groups:[{title:'details',fields:['f0','f0']}]}}),
+    request([field('text')], {composition:{layout:'stack',groups:[{title:'details',fields:['f1']}]}}),
+    request([field('text')], {composition:{layout:'stack',groups:[{title:'details',fields:['f0'],hidden:true}]}}),
+    request([field('text')], {composition:{layout:'stack',groups:[{title:'details',fields:['f0']}],html:'<input>'}}),
+    request([field('checkbox')], {composition:{layout:'stack',groups:[{title:'details',fields:['f0']}]}}),
     request([field('file')]), request([field('radio')]), request([field('text')], { mode: 'unknown' }),
     request([field('text')], { mode: 'form', actionLabel: 'Buy now' }),
     request([field('text', 0, { min: 0 })]), request([field('text', 0, { value: 'untrusted-prefill' })]),

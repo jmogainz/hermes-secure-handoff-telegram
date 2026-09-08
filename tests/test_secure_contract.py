@@ -83,7 +83,8 @@ def test_v3_decrypts_checkout_values_and_requires_field_free_confirmation():
         action_label="Authorize purchase",
     )
     confirm_raw = _envelope(confirmation, confirmation_key, {"confirm": True})
-    assert decrypt_submission(confirm_raw, confirmation, confirmation_key) == {"confirm": True}
+    with pytest.raises(ValueError, match="invalid submission"):
+        decrypt_submission(confirm_raw, confirmation, confirmation_key)
 
     values_in_confirmation = _envelope(confirmation, confirmation_key, {"values": {}})
     with pytest.raises(ValueError):

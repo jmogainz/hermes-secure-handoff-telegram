@@ -2,15 +2,15 @@
 
 ## Product boundary
 
-Hermes Secure Handoff Telegram is an encrypted human-entry bridge, not an autonomous form-submission engine. The operator owns one Telegram DM and one dedicated local Chrome profile. The Mini App renders one bounded request; the gateway decrypts only at private apply time. No passwords, OTPs, payment details, field values, cookies, raw DOM or decrypted payloads belong in model tools, logs, receipts, screenshots or memory.
+Hermes Secure Handoff Telegram is an encrypted human-entry bridge with a separately gated, owner-approved observed checkout action. The operator owns one Telegram DM and one dedicated local Chrome profile. The Mini App renders one bounded request; the gateway decrypts only at private apply time. No passwords, OTPs, payment details, field values, cookies, raw DOM or decrypted payloads belong in model tools, logs, receipts, screenshots or memory.
 
 ## Modes
 
 - **v1 connection check:** a fixed synthetic phrase tests RSA-OAEP/Telegram delivery. No credentials.
 - **v3 auth:** one positively classified identifier/password/OTP stage. A bound auth action may be executed only after the human sends the encrypted stage. Split OTP can rely on the site's own final-digit action.
 - **v3 form:** explicit `mode: form`, action label `Fill fields`. General encrypted entry only. No Submit, Save, Delete, Pay or Enter action is executed by the controller.
-- **v3 checkout:** supported billing/payment fields are filled, then the request/key/bindings are scrubbed and the status becomes `human_action_required`.
-- **Legacy v3 payment_confirmation:** recognized for safe rejection/compatibility only. The frontend cannot send it and the controller cannot execute a purchase. An origin plus `confirm: true` is insufficient transaction consent. Remote approval requires a future bound, user-visible amount/currency/merchant/recurrence/terms design.
+- **v3 checkout:** supported billing/payment fields are filled. Ordinary checkout then becomes `human_action_required`; an explicitly source-authorized observed checkout can instead receive a fresh review and separate encrypted approval for one guarded action.
+- **Legacy v3 payment_confirmation:** recognized for safe rejection/compatibility only. The frontend cannot send it and the controller cannot execute a purchase. An origin plus `confirm: true` is insufficient transaction consent. Observed approval requires runtime-issued facts, explicit source authorization, a fresh user-visible review and an exact one-shot capability.
 
 ## Ownership and publication
 

@@ -122,7 +122,70 @@ try {
   assert.equal(await page.locator('#field-list input').count(), 0);
   assert.equal(await page.locator('#send-button').isDisabled(), true);
   assert.equal(await page.evaluate(() => typeof window.__sent), 'undefined');
-  console.log('frontend checkout browser test: PASS');
+  const approval = { ...confirmation, id: 'sh_purchase', mode: 'purchase_approval', stage: 'purchase_approval', actionLabel: 'Complete purchase',
+    transaction: { id: 'tx_01234567890123456789012345678901', summary: {
+      item: 'example.test — one year', merchant: 'Example merchant', currency: 'USD', totalIncludingTax: '12.34',
+      renewal: 'No renewal. One-time purchase.', terms: 'Non-refundable. No other fees.',
+    } } };
+  await page.goto('about:blank');
+  await page.goto(`${base}#request=${b64(JSON.stringify(approval))}&tgWebAppVersion=9.6`, { waitUntil: 'networkidle' });
+  assert.match(await page.locator('#page-title').textContent(), /Review purchase/);
+  for (const value of Object.values(approval.transaction.summary)) assert.ok((await page.locator('#secure-details').innerText()).includes(value));
+  assert.equal(await page.locator('#field-list input').count(), 0);
+  await page.getByRole('button', { name: 'Complete purchase', exact: true }).click();
+  await page.waitForFunction(() => typeof window.__sent === 'string');
+  assert.deepEqual(await decryptEnvelope(await page.evaluate(() => window.__sent), approval.id), { approve: approval.transaction.id });
+  for (const mutate of [
+    r => { r.transaction.summary.renewal = 'Unknown'; },
+    r => { r.transaction.summary.item = 'example.test\u202e'; },
+    r => { r.transaction.summary.terms = ''; },
+    r => { delete r.transaction.summary.currency; },
+    r => { r.transaction.summary.extra = 'unexpected'; },
+    r => { r.actionLabel = 'Pay something else'; },
+    r => { r.transaction.id = 'tx_wrong'; },
+  ]) {
+    const invalid = structuredClone(approval); mutate(invalid);
+    await page.goto('about:blank');
+    await page.goto(`${base}#request=${b64(JSON.stringify(invalid))}&tgWebAppVersion=9.6`, { waitUntil: 'networkidle' });
+    assert.equal(await page.locator('#send-button').isDisabled(), true);
+    assert.equal(await page.evaluate(() => typeof window.__sent), 'undefined');
+  }
+  await page.goto('about:blank');
+  await page.goto(`${base}#request=${b64(JSON.stringify(approval))}&tgWebAppVersion=9.6`, { waitUntil: 'networkidle' });
+  await page.evaluate(() => { window.calls = 0; window.Telegram.WebApp.sendData = () => { window.calls++; throw Error('synthetic ambiguity'); }; });
+  await page.getByRole('button', { name: 'Complete purchase', exact: true }).click();
+  await page.waitForFunction(() => window.calls === 1);
+  assert.equal(await page.locator('#send-button').isDisabled(), true);
+  assert.match(await page.locator('#status-message').textContent(), /Do not retry/);
+  const displayCases = JSON.parse(await readFile(resolve(root, 'tests/purchase_display_cases.json'), 'utf8'));
+  const observed = { ...approval, transaction: {
+    id: approval.transaction.id, contract: 'observed_action_v1', revision: 'pr_' + 'r'.repeat(32),
+    coverage: 'selected_facts_only', warningVersion: 'unresolved_terms_v1',
+    action: { ref: 'pa_' + 'a'.repeat(32), role: 'purchase_action', label: 'Bound purchase action' },
+    facts: [
+      { ref: 'pf_' + 'i'.repeat(32), role: 'item', value: 'Example product', provenance: 'public_product_matched' },
+      { ref: 'pf_' + 't'.repeat(32), role: 'displayed_total', amount: '12.34', currency: 'USD', provenance: 'checkout_observation' },
+    ],
+  } };
+  for (const value of [...displayCases.acceptedItems, ...displayCases.rejectedCodePoints.map(c => `Example ${String.fromCodePoint(c)}123 product`)]) {
+    const valid = displayCases.acceptedItems.includes(value);
+    const request = structuredClone(observed);
+    request.transaction.facts[0].value = value;
+    await page.goto('about:blank');
+    await page.goto(`${base}#request=${b64(JSON.stringify(request))}&tgWebAppVersion=9.6`);
+    await page.waitForFunction(() => document.querySelector('.app-card').dataset.state !== 'loading');
+    assert.equal(await page.locator('.app-card').getAttribute('data-state'), valid ? 'secureReady' : 'error', JSON.stringify(value));
+    if (valid) {
+      assert.ok((await page.locator('#transaction-summary').textContent()).includes(value));
+      assert.equal(await page.locator('#purchase-acknowledgment').isChecked(), false);
+    } else {
+      assert.equal(await page.locator('#purchase-acknowledgment').count(), 0);
+      assert.equal(await page.locator('#transaction-summary').count(), 0);
+      assert.equal(await page.locator('#send-button').isDisabled(), true);
+      assert.equal(await page.evaluate(() => typeof window.__sent), 'undefined');
+    }
+  }
+  console.log('frontend checkout + transaction approval browser test: PASS');
 } finally {
   await browser.close();
   await new Promise(resolveServer => server.close(resolveServer));

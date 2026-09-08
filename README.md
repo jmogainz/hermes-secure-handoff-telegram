@@ -2,7 +2,7 @@
 
 Hermes Secure Handoff Telegram is a standalone Hermes plugin and static Telegram Mini App for owner-scoped handoffs into a dedicated local browser profile.
 
-It supports staged authentication, one-time codes, encrypted general-form entry, registrant/billing fields, and supported payment fields. Generic forms are fill-only: recognizing a field never authorizes a submission. Checkout ends at a human-owned final transaction review; this release does not execute purchase actions.
+It supports staged authentication, one-time codes, encrypted general-form entry, registrant/billing fields, and supported payment fields. Generic forms and ordinary checkout are fill-only: recognizing a field never authorizes a submission. An explicitly armed, source-bound observed checkout can expose a separate **Complete purchase** approval for one guarded browser action.
 
 The plugin stays provider-neutral. It does not hardcode provider URLs, account names, or site-specific selectors.
 
@@ -19,7 +19,7 @@ The plugin stays provider-neutral. It does not hardcode provider URLs, account n
 ```text
 Telegram bot + Hermes gateway
         │
-        ├── short-lived encrypted Mini App request
+        ├── short-lived public Mini App manifest
         │       └── v3 typed auth/form/checkout fields
         │
         └── Hermes plugin ── loopback CDP ── dedicated Chrome profile
@@ -32,6 +32,28 @@ Telegram bot + Hermes gateway
 - Hermes decrypts only at the browser mutation boundary and never writes values to model prompts, logs, receipts, screenshots, or chat.
 - Each handoff is bound to one owner ID, private chat/thread identity, browser page, document generation, origin, and one-time request key.
 - Browser action targets are revalidated immediately before mutation.
+
+## Local candidate: agent-composed entry
+
+The current source adds `attach` with `mode: "compose"`, opaque field discovery,
+`present_composition`, and component status/cancellation. The agent chooses
+optional fields, visual order, finite group headings and stack/section layouts;
+required fields cannot be omitted. Inputs start empty. This is encrypted
+**ENTRY only**, not completed remote purchase support. See the exact
+[composition API and limits](docs/composition.md).
+
+A separate local observed-action candidate now integrates real public-fact
+registries, `inspect_purchase` / `compose_purchase`, a fresh Mini App approval,
+and an encrypted one-shot guarded action. A private acquisition bridge now joins
+explicitly selected source refs to composed ENTRY; ordinary composition is still
+fill-only. The agent can propose an exact opaque catalog source via
+`discover_catalog_sources` / `request_source_approval`; the owner must review the
+original browser page and explicitly allow it through the encrypted Mini App.
+This source-selection lease is not privacy certification or purchase authority.
+Without the owner grant, source discovery fails closed. See the exact
+[acquisition API and supported shapes](docs/purchase-acquisition.md).
+The legacy certified-summary registry remains empty. See [observed-action scope and prerequisites](docs/observed-purchase-status.md)
+for the exact API, synthetic evidence, public-metadata boundary and remaining gaps.
 
 ## Supported handoff modes
 
@@ -53,12 +75,12 @@ The controller recognizes a generic checkout shape from visible semantic fields 
 
 The flow is deliberately two-step:
 
-1. The Mini App submits the typed checkout fields through an encrypted `mode: checkout` request.
+1. The Mini App submits the typed checkout fields through an encrypted `mode: checkout` or composed-entry request.
 2. Hermes fills the bound browser controls but does not click the purchase action.
-3. Hermes scrubs the request/key/bindings and returns `human_action_required`.
-4. The user reviews the exact amount, currency, merchant, recurrence and terms in the provider page and completes the transaction there.
+3. For ordinary checkout, Hermes scrubs the request/key/bindings and returns `human_action_required`; the user completes the transaction in the provider page.
+4. For an explicitly source-authorized observed checkout, the agent selects only runtime-issued facts and the Mini App publishes a fresh review. The user's separate **Complete purchase** tap authorizes one exact guarded browser action.
 
-Legacy `payment_confirmation` messages are blocked by the Mini App and cannot execute a purchase in the controller. A future remote purchase gate needs a user-visible, immutable transaction summary, not just an origin and a boolean.
+Legacy `payment_confirmation` messages are blocked by the Mini App and cannot execute a purchase in the controller. The observed-action path requires a fresh runtime-bound fact set, explicit source authorization, a separate user-visible review, and an exact encrypted capability—not just an origin and a boolean.
 
 A submitted action is not proof that a provider accepted payment. CAPTCHA, 3DS, MFA, passkeys, provider redirects, and final purchase results remain user/provider-owned checkpoints.
 
