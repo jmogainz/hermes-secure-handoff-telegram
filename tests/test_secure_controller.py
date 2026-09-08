@@ -82,6 +82,41 @@ async def test_bind_stage_supports_generic_checkout_fields_and_payment_action(tm
 
 
 @pytest.mark.asyncio
+async def test_checkout_uses_the_active_dialog_and_excludes_background_controls(tmp_path):
+    site = start_demo()
+    controller = await disposable_controller(tmp_path)
+    identity = (7, 8, 42)
+    session = None
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        await session.page.set_content(
+            '<main><input type="search" aria-label="Search">'
+            '<button type="submit">Buy</button>'
+            '<div role="dialog" style="display:block;position:fixed;inset:0">'
+            '<h2>Billing Information</h2>'
+            '<label>Billing name<input name="name" autocomplete="name" type="text"></label>'
+            '<label>Billing email<input name="email" autocomplete="email" type="email"></label>'
+            '<label>Card number<input name="cardNumber" autocomplete="cc-number" type="text"></label>'
+            '<button type="submit">Buy</button></div></main>'
+        )
+
+        await controller._bind_stage(session)
+
+        assert session.mode == "checkout"
+        assert [meta["type"] for key, meta in session.ref_meta.items() if key.startswith("f")] == [
+            "text", "email", "card_number"
+        ]
+        assert await session.page.evaluate(
+            "e => e.closest('[role=\\\"dialog\\\"]') !== null", session.refs["submit"]
+        ) is True
+    finally:
+        if session is not None:
+            await controller._close(identity)
+        await controller._dispose(session)
+        site.close()
+
+
+@pytest.mark.asyncio
 async def test_bind_stage_supports_checkout_fields_in_an_https_child_frame(tmp_path):
     top_site = start_demo()
     frame_site = start_demo()

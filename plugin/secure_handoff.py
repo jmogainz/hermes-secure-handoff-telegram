@@ -581,26 +581,40 @@ class SecureHandoffController:
         }
 
     async def _find_checkout_action(self, page, adapter):
-        found = []
-        labels = {label.casefold() for label in CHECKOUT_ACTIONS}
-        for locator in await page.locator("button, input[type=submit], [role=button]").all():
+        # Billing/checkout flows commonly render an active modal over a page
+        # that still contains an underlying action with the same label. Scope
+        # discovery to the sole visible dialog instead of guessing globally.
+        roots = [page]
+        visible_dialogs = []
+        for dialog in await page.locator("dialog,[role=dialog]").all():
             try:
-                if not await locator.is_visible() or not await locator.is_enabled():
-                    continue
-                text = (await locator.inner_text()).strip() if (await locator.get_attribute("type") or "").lower() != "submit" else (await locator.get_attribute("value") or await locator.inner_text()).strip()
-                if " ".join(text.split()).casefold() not in labels:
-                    continue
-                handle = await locator.element_handle()
-                duplicate = False
-                if handle:
-                    for existing in found:
-                        if await page.evaluate("a => a[0] === a[1]", [handle, existing]):
-                            duplicate = True
-                            break
-                if handle and not duplicate:
-                    found.append(handle)
+                if await dialog.is_visible():
+                    visible_dialogs.append(dialog)
             except Exception:
                 continue
+        if len(visible_dialogs) == 1:
+            roots = visible_dialogs
+        found = []
+        labels = {label.casefold() for label in CHECKOUT_ACTIONS}
+        for root in roots:
+            for locator in await root.locator("button, input[type=submit], [role=button]").all():
+                try:
+                    if not await locator.is_visible() or not await locator.is_enabled():
+                        continue
+                    text = (await locator.inner_text()).strip() if (await locator.get_attribute("type") or "").lower() != "submit" else (await locator.get_attribute("value") or await locator.inner_text()).strip()
+                    if " ".join(text.split()).casefold() not in labels:
+                        continue
+                    handle = await locator.element_handle()
+                    duplicate = False
+                    if handle:
+                        for existing in found:
+                            if await page.evaluate("a => a[0] === a[1]", [handle, existing]):
+                                duplicate = True
+                                break
+                    if handle and not duplicate:
+                        found.append(handle)
+                except Exception:
+                    continue
         if len(found) != 1:
             raise ValueError("checkout action is ambiguous")
         action = found[0]
@@ -639,6 +653,18 @@ class SecureHandoffController:
                     handle = await element.element_handle()
                     if not handle:
                         continue
+                    if frame == page.main_frame:
+                        in_scope = await page.evaluate(
+                            """a => {
+                                const [element, form, scope] = a;
+                                if (!element || !element.isConnected) return false;
+                                if (form) return element.form === form || form.contains(element);
+                                return !!scope && scope.contains(element);
+                            }""",
+                            [handle, form, scope],
+                        )
+                        if in_scope is not True:
+                            continue
                     host = None if frame == page.main_frame else await frame.frame_element()
                     if host is not None and not await page.evaluate("a => a[1].contains(a[0])", [host, scope]):
                         continue
