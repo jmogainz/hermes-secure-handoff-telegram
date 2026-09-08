@@ -19,6 +19,8 @@ SUPPORTED_FIELD_TYPES = frozenset({
     "card_expiry",
     "cvc",
     "select",
+    "textarea", "checkbox", "date", "time", "datetime-local", "month", "week",
+    "url", "search", "color", "range",
 })
 
 
@@ -73,10 +75,10 @@ class BrowserAdapter:
         ):
             return "otp"
 
-        # Username semantics take precedence over the generic email type so a
-        # login identifier remains one logical stage.
+        # Preserve the native email keyboard/validation contract even when this
+        # control is the login username stage. Authority is checked separately.
         if tokens & {"username"} or any(token in name for token in ("user", "login", "username")):
-            return "text"
+            return "email" if typ == "email" else "text"
         if typ == "email" or "email" in tokens or "email" in name:
             return "email"
         if typ == "tel" or "tel" in tokens or any(token in semantic for token in ("phone", "telephone", "mobile")):
@@ -89,13 +91,33 @@ class BrowserAdapter:
             return "text"
         return None
 
+    def classify_form_control(self, metadata: dict[str, str]) -> str | None:
+        """Native shape first; never turn a postal code into an auth stage."""
+        tag, typ = metadata.get("tag"), metadata.get("type")
+        if tag in {"textarea", "select"}:
+            return tag
+        if tag != "input":
+            return None
+        if typ == "radio":
+            return "select"
+        if typ in {"text", "tel", "number", "one-time-code"} and (
+            "one-time-code" in metadata.get("autocomplete", "").split() or typ == "one-time-code"
+        ):
+            return "otp"
+        if typ in SUPPORTED_FIELD_TYPES - PAYMENT_KINDS - {"select", "textarea", "otp"}:
+            return typ
+        return None
+
     def stage_for(
         self,
         field_types: tuple[str, ...],
         *,
         checkout: bool = False,
+        form: bool = False,
         confirmation: bool = False,
     ) -> StageDescriptor:
+        if form:
+            return StageDescriptor("general_form", "Fill fields", "Encrypted entries fill the bound controls without clicking submit.", "form")
         if confirmation:
             return StageDescriptor(
                 "payment_confirmation",
@@ -148,14 +170,6 @@ GENERIC_ADAPTER = BrowserAdapter(
         "Sign in",
         "Log in",
         "Submit",
-        "Buy",
-        "Pay",
-        "Purchase",
-        "Place order",
-        "Complete purchase",
-        "Continue to payment",
-        "Submit payment",
-        "Authorize purchase",
     ),
 )
 

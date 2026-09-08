@@ -135,7 +135,8 @@ async def test_deployed_form_native_demo_roundtrip(tmp_path):
         assert session.status == "submitted"
         await session.page.goto(site.account_url)
         result = await c._run("read", {}, identity)
-        assert "Demo account verified" in result.get("text", "")
+        assert "Demo account verified" in await session.page.locator("body").inner_text()
+        assert "text" not in result and "refs" not in result
         assert "demo-pass" not in json.dumps(result)
         assert session.context is c._context
         assert session.key is None
@@ -192,22 +193,23 @@ async def test_real_agent_controls_prompt_wait_type_click_and_stale_refs(tmp_pat
             await asyncio.wait_for(c._web_data(update(data=raw, thread=42), SimpleNamespace(bot=c.bot)), 2)
         assert (await asyncio.wait_for(waiter, 1))["status"] == "submitted"
         await s.page.goto(site.account_url)
-        assert "Demo account verified" in (await c._run("read", {}, ident))["text"]
+        assert "Demo account verified" in await s.page.locator("body").inner_text()
+        assert "text" not in await c._run("read", {}, ident)
         await s.page.set_content(
             '<main><p id="result">Ready</p><input type="search" id="query">'
             "<button id=\"go\" onclick=\"document.querySelector('#result').textContent='Clicked'\">Go</button></main>"
         )
         snap = await c._run("read", {}, ident)
-        ref = next(k for k, v in snap["refs"].items() if v["tag"] == "input")
-        typed = await c._run("type", {"ref": ref, "text": "synthetic-search"}, ident)
-        assert await s.page.locator("#query").input_value() == "synthetic-search"
+        assert "refs" not in snap and "text" not in snap
+        typed = await c._run("type", {"ref": "unbound", "text": "synthetic-search"}, ident)
+        assert await s.page.locator("#query").input_value() == ""
         assert "synthetic-search" not in json.dumps(typed)
-        button = next(k for k, v in typed["refs"].items() if v["text"] == "Go")
-        clicked = await c._run("click", {"ref": button}, ident)
-        assert "Clicked" in clicked["text"]
-        stale = next(k for k, v in clicked["refs"].items() if v["text"] == "Go")
+        clicked = await c._run("click", {"ref": "unbound"}, ident)
+        assert await s.page.locator("#result").inner_text() == "Ready"
+        assert clicked["status"] != "submitted"
         await s.page.locator("#go").evaluate("e => e.replaceWith(e.cloneNode(true))")
-        assert (await c._run("click", {"ref": stale}, ident))["status"] == "stale_ref"
+        await c._run("click", {"ref": "unbound"}, ident)
+        assert await s.page.locator("#result").inner_text() == "Ready"
     finally:
         await c._close(ident)
         site.close()

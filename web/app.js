@@ -10,7 +10,7 @@
   const CLOCK_SKEW_MS = 30 * 1000;
   const MAX_FIELDS = 24;
   const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-  const FIELD_TYPES = new Set(['text', 'email', 'tel', 'number', 'password', 'otp', 'card_number', 'card_expiry', 'cvc', 'select']);
+  const FIELD_TYPES = new Set(['text', 'email', 'tel', 'number', 'password', 'otp', 'card_number', 'card_expiry', 'cvc', 'select', 'textarea', 'checkbox', 'date', 'time', 'datetime-local', 'month', 'week', 'url', 'search', 'color', 'range']);
   const PRIVATE_JWK_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth'];
 
   const dom = {
@@ -20,11 +20,14 @@
     message: document.querySelector('#status-message'),
     privacyNote: document.querySelector('#privacy-note'),
     sendButton: document.querySelector('#send-button'),
+    cancelButton: document.querySelector('#cancel-button'),
     secondary: document.querySelector('#secondary-message'),
     details: document.querySelector('#secure-details'),
     form: document.querySelector('#credential-form'),
     origin: document.querySelector('#request-origin'),
     fields: document.querySelector('#field-list'),
+    fieldGroup: document.querySelector('#field-group'),
+    fieldCount: document.querySelector('#field-count'),
   };
 
   const state = {
@@ -33,6 +36,9 @@
     telegram: null,
     sending: false,
     version: 1,
+    closed: false,
+    buffers: new Set(),
+    expiryTimer: null,
   };
 
   const stageCopy = {
@@ -52,10 +58,7 @@
       title: 'Enter checkout details',
       message: 'Entries are encrypted locally before transmission.',
     },
-    payment_confirmation: {
-      title: 'Authorize purchase',
-      message: 'Review the browser page, then confirm the purchase.',
-    },
+
   };
 
   function resolveStageCopy(stage) {
@@ -80,6 +83,16 @@
   }
 
   const views = {
+    paymentBlocked: {
+      kicker: 'Manual review required',
+      title: 'Review payment in the browser',
+      message: 'This request has no bound transaction summary. Payment approval is unavailable here. Review the details and complete any purchase yourself on the provider’s page.',
+    },
+    cancelled: {
+      kicker: 'Request closed',
+      title: 'Handoff cancelled',
+      message: 'Entries were cleared. Reopen the handoff from Telegram to try again.',
+    },
     loading: {
       kicker: 'Preparing secure check',
       title: 'Check your Telegram connection',
@@ -149,14 +162,19 @@
     if (!view) return;
 
     if (viewName === 'secureReady') {
-      const stageInfo = resolveStageCopy(state.request?.stage);
-      view = { ...view, ...stageInfo };
+      const stageInfo = state.request?.mode === 'form'
+        ? { title: 'Fill browser fields', message: 'Fills the selected browser fields without clicking Submit. Entries are encrypted locally.' }
+        : resolveStageCopy(state.request?.stage);
+      view = { ...view, ...stageInfo, kicker: { form: 'Fill only', auth: 'Secure sign-in', checkout: 'Checkout details' }[state.request?.mode] || view.kicker };
+      if (state.request?.mode === 'checkout') view.message = 'Send the requested details securely. This does not authorize a purchase. Complete any payment yourself in the browser.';
     }
 
-    const isError = ['missing', 'outside', 'expired', 'invalid', 'unsupported'].includes(viewName);
+    const isError = ['missing', 'outside', 'expired', 'invalid', 'unsupported', 'cancelled'].includes(viewName);
     const isRetry = viewName === 'sendFailed';
     const isSending = viewName === 'sending' || viewName === 'secureSending';
+    const isBlocked = viewName === 'paymentBlocked';
     const isSecure = state.version === 3;
+    if (isSecure && isRetry) view = { kicker: 'Submission not confirmed', title: 'Your entries were cleared', message: 'We could not confirm this submission. Your entries were cleared for privacy. Check Telegram before trying again.' };
     const showButton = viewName === 'ready' || isRetry || viewName === 'secureReady';
 
     dom.card.dataset.state = isError ? 'error' : isRetry ? 'send-failed' : viewName;
@@ -165,7 +183,12 @@
     dom.message.textContent = view.message;
     if (dom.secondary) dom.secondary.textContent = view.secondary || '';
     dom.sendButton.hidden = !showButton && !isSending;
-    dom.sendButton.disabled = isSending;
+    dom.sendButton.disabled = isSending || isError || isBlocked || state.closed;
+    dom.form.setAttribute('aria-busy', String(isSending));
+    if (isError || isRetry || isBlocked) clearPlaintext();
+    if (isError) { state.closed = true; state.publicKey = null; clearTimeout(state.expiryTimer); }
+    for (const control of dom.fields.querySelectorAll('input, textarea, select')) control.disabled = isSending || isError || state.closed;
+    dom.cancelButton.hidden = !isSecure || isError || state.closed;
     const actionLabel = state.request?.actionLabel || 'Submit to browser';
     const buttonText = isSecure
       ? (isSending ? 'Submitting…' : state.version === 3 ? actionLabel : 'Submit to browser')
@@ -181,13 +204,10 @@
       : (isRetry ? 'Try the connection test again' : isSending ? 'Sending the connection test' : 'Send the connection test'));
     if (dom.privacyNote) {
       dom.privacyNote.setAttribute('data-state', isError || isRetry ? 'error' : 'default');
-      if (isSecure && viewName === 'secureReady') {
-        dom.privacyNote.textContent = state.request?.mode === 'payment_confirmation'
-          ? 'Confirm only after reviewing the live browser page.'
-          : 'Encrypted locally in this page. Telegram receives only the encrypted submission.';
-      }
+      dom.privacyNote.hidden = !isSecure || isError || isBlocked;
+      dom.privacyNote.textContent = 'Encrypted on this device. This page does not store your entries.';
     }
-    dom.details.hidden = !isSecure || ['missing', 'outside', 'expired', 'invalid', 'unsupported'].includes(viewName);
+    dom.details.hidden = !isSecure || isError;
   }
 
   function decodeBase64Url(value, maxBytes) {
@@ -316,28 +336,35 @@
   }
 
   function validateV3Request(request) {
+    const allowedKeys = new Set(['v', 'id', 'expiresAt', 'publicKey', 'origin', 'mode', 'actionLabel', 'fields', 'stage', 'provider', 'demo']);
+    if (Object.keys(request).some(key => !allowedKeys.has(key))) throw new RequestError('invalid');
     let origin;
     try { origin = new URL(request.origin); } catch { throw new RequestError('invalid'); }
     if (origin.protocol !== 'https:' || origin.origin !== request.origin || origin.username || origin.password || origin.search || origin.hash) throw new RequestError('invalid');
-    if (!['auth', 'checkout', 'payment_confirmation'].includes(request.mode)) throw new RequestError('invalid');
-    if (typeof request.actionLabel !== 'string' || !request.actionLabel.trim() || request.actionLabel.length > 80 || /[\x00-\x1f]/.test(request.actionLabel)) throw new RequestError('invalid');
+    if (!['auth', 'checkout', 'payment_confirmation', 'form'].includes(request.mode)) throw new RequestError('invalid');
+    if (typeof request.actionLabel !== 'string' || !request.actionLabel.trim() || request.actionLabel.length > 80 || /[\x00-\x1f\x7f]/.test(request.actionLabel)) throw new RequestError('invalid');
+    if (request.mode === 'form' && request.actionLabel !== 'Fill fields') throw new RequestError('invalid');
     if (!Array.isArray(request.fields) || request.fields.length > MAX_FIELDS) throw new RequestError('invalid');
     if (request.mode === 'payment_confirmation' ? request.fields.length !== 0 : request.fields.length < 1) throw new RequestError('invalid');
-    if (request.stage !== undefined && (typeof request.stage !== 'string' || !ID_PATTERN.test(request.stage))) throw new RequestError('invalid');
-    if (request.provider !== undefined && (typeof request.provider !== 'string' || !ID_PATTERN.test(request.provider))) throw new RequestError('invalid');
+    const safeToken = /^[A-Za-z0-9_-]{1,64}$/;
+    if (request.stage !== undefined && (typeof request.stage !== 'string' || !safeToken.test(request.stage))) throw new RequestError('invalid');
+    if (request.provider !== undefined && (typeof request.provider !== 'string' || !safeToken.test(request.provider))) throw new RequestError('invalid');
     const ids = new Set();
     const fieldIdPattern = /^f(?:[0-9]|1[0-9]|2[0-3])$/;
-    const safeOption = value => typeof value === 'string' && value.length <= 128 && !/[\x00-\x1f]/.test(value);
+    const safeOption = value => typeof value === 'string' && value.length <= 128 && !/[\x00-\x1f\x7f]/.test(value);
+    const allowedFieldKeys = new Set(['id', 'label', 'type', 'required', 'autocomplete', 'inputMode', 'options']);
     for (const field of request.fields) {
-      if (!field || typeof field !== 'object' || typeof field.id !== 'string' || !fieldIdPattern.test(field.id) || ids.has(field.id)) throw new RequestError('invalid');
-      if (typeof field.label !== 'string' || !field.label.trim() || field.label.length > 80 || /[\x00-\x1f]/.test(field.label) || !FIELD_TYPES.has(field.type)) throw new RequestError('invalid');
+      if (!field || typeof field !== 'object' || Array.isArray(field) || Object.keys(field).some(key => !allowedFieldKeys.has(key)) || typeof field.id !== 'string' || !fieldIdPattern.test(field.id) || ids.has(field.id)) throw new RequestError('invalid');
+      if (typeof field.label !== 'string' || !field.label.trim() || field.label.length > 80 || /[\x00-\x1f\x7f]/.test(field.label) || !FIELD_TYPES.has(field.type)) throw new RequestError('invalid');
       if (typeof field.required !== 'boolean') throw new RequestError('invalid');
       if (field.autocomplete !== undefined && (typeof field.autocomplete !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(field.autocomplete))) throw new RequestError('invalid');
       if (field.inputMode !== undefined && !['text', 'numeric', 'decimal', 'tel', 'email'].includes(field.inputMode)) throw new RequestError('invalid');
       if (field.type === 'select') {
         if (!Array.isArray(field.options) || field.options.length < 1 || field.options.length > 64) throw new RequestError('invalid');
+        const values = new Set();
         for (const option of field.options) {
-          if (!option || typeof option !== 'object' || Object.keys(option).length !== 2 || !safeOption(option.value) || !safeOption(option.label) || !option.label.trim()) throw new RequestError('invalid');
+          if (!option || typeof option !== 'object' || Array.isArray(option) || Object.keys(option).length !== 2 || !safeOption(option.value) || !safeOption(option.label) || !option.label.trim() || values.has(option.value)) throw new RequestError('invalid');
+          values.add(option.value);
         }
       } else if (field.options !== undefined) {
         throw new RequestError('invalid');
@@ -352,7 +379,7 @@
       text: { name: 'username', autocomplete: 'off', inputMode: 'text', type: 'text', enterKeyHint: 'next' },
       email: { name: 'email', autocomplete: 'email', inputMode: 'email', type: 'email', enterKeyHint: 'next' },
       tel: { name: 'tel', autocomplete: 'tel', inputMode: 'tel', type: 'tel', enterKeyHint: 'next' },
-      number: { name: 'number', autocomplete: 'off', inputMode: 'decimal', type: 'text', enterKeyHint: 'next' },
+      number: { name: 'number', autocomplete: 'off', inputMode: 'decimal', type: 'number', enterKeyHint: 'next' },
       password: { name: 'password', autocomplete: 'current-password', inputMode: 'text', type: 'password', enterKeyHint: 'go' },
       otp: { name: 'one-time-code', autocomplete: 'one-time-code', inputMode: 'numeric', type: 'text', enterKeyHint: 'done' },
       card_number: { name: 'cardnumber', autocomplete: 'cc-number', inputMode: 'numeric', type: 'password', enterKeyHint: 'next' },
@@ -362,47 +389,123 @@
     if (field.type === 'text' && request?.mode === 'auth' && request.stage === 'identifier') {
       return { ...defaults.text, name: 'username', autocomplete: 'username' };
     }
-    return defaults[field.type] || defaults.text;
+    return defaults[field.type] || { name: field.id, autocomplete: 'off', type: field.type, enterKeyHint: 'next' };
   }
 
   function renderSecureFields(request) {
     dom.origin.textContent = request.origin;
     dom.fields.replaceChildren();
+    dom.fieldCount.textContent = `${request.fields.length} ${request.fields.length === 1 ? 'field' : 'fields'}`;
+    dom.fieldGroup.hidden = request.mode === 'payment_confirmation';
     if (request.v === 3 && request.mode === 'payment_confirmation') return;
     for (const field of request.fields) {
       const wrapper = document.createElement('div'); wrapper.className = 'field-row';
       const label = document.createElement('label'); label.textContent = field.label; label.htmlFor = `field-${field.id}`;
       if (field.required) { const required = document.createElement('span'); required.textContent = 'Required'; required.className = 'required-mark'; label.appendChild(required); }
       const select = field.type === 'select';
-      const input = document.createElement(select ? 'select' : 'input');
+      const input = document.createElement(select ? 'select' : field.type === 'textarea' ? 'textarea' : 'input');
       input.id = `field-${field.id}`;
       input.name = field.type === 'select' ? field.id : defaultFieldAttributes(field, request).name;
       input.setAttribute('aria-label', field.label);
+      input.setAttribute('aria-describedby', `status-message error-${field.id}`);
       input.required = field.required;
       input.dataset.fieldType = field.type;
       if (select) {
+        if (!field.options.some(option => option.value === '')) {
+          const placeholder = document.createElement('option');
+          placeholder.value = ''; placeholder.textContent = 'Choose an option';
+          placeholder.disabled = field.required;
+          input.appendChild(placeholder);
+        }
         for (const option of field.options || []) {
           const element = document.createElement('option');
           element.value = option.value;
           element.textContent = option.label;
           input.appendChild(element);
         }
+        input.value = '';
       } else {
         const attributes = defaultFieldAttributes(field, request);
-        input.type = attributes.type;
+        if (field.type !== 'textarea') input.type = attributes.type;
+        if (field.type === 'number') input.step = 'any';
         input.maxLength = 512;
         input.autocomplete = field.autocomplete || attributes.autocomplete;
         input.enterKeyHint = attributes.enterKeyHint;
-        input.inputMode = field.inputMode || attributes.inputMode;
+        if (field.inputMode || attributes.inputMode) input.inputMode = field.inputMode || attributes.inputMode;
         input.autocapitalize = 'none';
         input.autocorrect = 'off';
         input.spellcheck = false;
       }
       wrapper.append(label, input);
+      const error = document.createElement('small');
+      error.id = `error-${field.id}`; error.className = 'field-error'; error.hidden = true;
+      error.setAttribute('role', 'alert');
+      wrapper.appendChild(error);
       if (request.demo && field.type === 'text') { const hint = document.createElement('small'); hint.textContent = 'Demo example: demo'; wrapper.appendChild(hint); }
       if (request.demo && field.type === 'password') { const hint = document.createElement('small'); hint.textContent = 'Demo example: demo-pass'; wrapper.appendChild(hint); }
       dom.fields.appendChild(wrapper);
     }
+  }
+
+  function clearPlaintext() {
+    for (const buffer of state.buffers) buffer.fill(0);
+    state.buffers.clear();
+    for (const error of dom.fields.querySelectorAll('.field-error')) { error.textContent = ''; error.hidden = true; }
+    for (const input of dom.fields.querySelectorAll('input, textarea, select')) {
+      input.value = '';
+      if (input.tagName === 'SELECT') input.selectedIndex = -1;
+      if (input.tagName === 'INPUT') input.checked = false;
+      input.removeAttribute('value');
+      input.removeAttribute('checked');
+      input.setCustomValidity('');
+      input.removeAttribute('aria-invalid');
+    }
+  }
+
+  function validTypedValue(field, input, value) {
+    if (value.length > 512) return false;
+    if (field.type === 'checkbox') return !field.required || value === 'true';
+    if (field.required && !(field.type === 'password' ? value : value.trim())) return false;
+    if (field.type === 'select') return field.options.some(option => option.value === value);
+    if (!value) return !input.validity.badInput;
+    if (['number', 'range'].includes(field.type)) {
+      if (!/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value) || !Number.isFinite(Number(value))) return false;
+      if (field.type === 'range' && (Number(value) < 0 || Number(value) > 100 || !Number.isInteger(Number(value)))) return false;
+    }
+    // WebKit can render month/week as text. Validate the wire type independently
+    // of the rendered input type, and never rely on native validation alone.
+    if (['date', 'datetime-local', 'month', 'week'].includes(field.type)) {
+      const pattern = { date: /^(\d{4})-(\d{2})-(\d{2})$/, 'datetime-local': /^(\d{4})-(\d{2})-(\d{2})T(.+)$/, month: /^(\d{4})-(\d{2})$/, week: /^(\d{4})-W(\d{2})$/ }[field.type];
+      const parts = value.match(pattern);
+      if (!parts || Number(parts[1]) < 1) return false;
+      const year = Number(parts[1]), unit = Number(parts[2]);
+      if (field.type === 'week') {
+        const jan = new Date(`${parts[1]}-01-01T00:00:00Z`).getUTCDay();
+        const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+        if (unit < 1 || unit > (jan === 4 || (jan === 3 && leap) ? 53 : 52)) return false;
+      } else {
+        if (unit < 1 || unit > 12) return false;
+        if (parts[3]) {
+          const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+          const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][unit - 1];
+          if (Number(parts[3]) < 1 || Number(parts[3]) > days) return false;
+        }
+        if (field.type === 'datetime-local' && !validTime(parts[4])) return false;
+      }
+    }
+    if (field.type === 'time' && !validTime(value)) return false;
+    if (field.type === 'color' && !/^#[0-9a-f]{6}$/i.test(value)) return false;
+    const probe = document.createElement('input');
+    probe.type = defaultFieldAttributes(field, state.request).type;
+    probe.step = 'any';
+    probe.value = value;
+    const valid = !probe.validity.typeMismatch && !probe.validity.badInput;
+    probe.value = '';
+    return valid;
+  }
+
+  function validTime(value) {
+    return /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?$/.test(value);
   }
 
   function findTelegramWebApp() {
@@ -449,7 +552,8 @@
   }
 
   async function sendTest() {
-    if (state.sending || !state.request || !state.publicKey || !state.telegram) return;
+    if (state.closed || state.sending || !state.request || !state.publicKey || !state.telegram) return;
+    if (state.request.mode === 'payment_confirmation') { render('paymentBlocked'); return; }
 
     if (state.version === 3) return sendSecure();
     state.sending = true;
@@ -487,46 +591,70 @@
   }
 
   async function sendSecure() {
-    if (state.sending) return;
-    const confirmation = state.version === 3 && state.request.mode === 'payment_confirmation';
+    if (state.closed || state.sending || state.request.mode === 'payment_confirmation') return;
     const values = {};
     const controls = [];
-    if (!confirmation) {
-      for (const field of state.request.fields) {
-        const input = document.getElementById(`field-${field.id}`);
-        if (!input) { render('invalid'); return; }
-        controls.push(input);
-        const value = input.value;
-        if (value.length > 512) { input.setCustomValidity('This field is too long.'); input.reportValidity(); input.focus(); return; }
-        input.setCustomValidity('');
-        if (field.required && !value) { input.reportValidity(); input.focus(); return; }
-        values[field.id] = value;
+    for (const field of state.request.fields) {
+      const input = document.getElementById(`field-${field.id}`);
+      if (!input) { clearPlaintext(); render('invalid'); return; }
+      controls.push(input);
+      const value = field.type === 'checkbox' ? String(input.checked) : input.value;
+      input.setCustomValidity('');
+      if (!validTypedValue(field, input, value)) {
+        clearPlaintext();
+        input.setAttribute('aria-invalid', 'true');
+        input.setCustomValidity('Check this field. Entries were cleared for privacy.');
+        const error = document.getElementById(`error-${field.id}`);
+        error.textContent = { email: 'Enter a valid email address.', url: 'Enter a complete, valid URL.', checkbox: 'Select this required checkbox.', select: 'Choose one of the listed options.' }[field.type] || 'Check this field and enter a valid value.';
+        error.hidden = false;
+        dom.message.textContent = 'Check the highlighted field and enter your details again. All entries were cleared for privacy.';
+        input.focus(); input.reportValidity(); return;
       }
     }
+    for (const [index, field] of state.request.fields.entries()) values[field.id] = field.type === 'checkbox' ? String(controls[index].checked) : controls[index].value;
     state.sending = true; render('secureSending');
     let plainBytes;
     let rawKeyBytes;
     try {
-      const plain = JSON.stringify(confirmation ? { confirm: true } : { values });
-      plainBytes = new TextEncoder().encode(plain);
+      plainBytes = new TextEncoder().encode(JSON.stringify({ values }));
+      for (const id of Object.keys(values)) delete values[id];
+      clearPlaintext();
+      state.buffers.add(plainBytes);
       if (plainBytes.byteLength > 2048 || Date.now() >= state.request.expiresAt) throw new RequestError(Date.now() >= state.request.expiresAt ? 'expired' : 'invalid');
       const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+      if (state.closed) return;
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(state.request.id) }, key, plainBytes);
+      plainBytes.fill(0);
+      if (state.closed) return;
       rawKeyBytes = new Uint8Array(await crypto.subtle.exportKey('raw', key));
+      state.buffers.add(rawKeyBytes);
+      if (state.closed) return;
       const wrappedKey = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, state.publicKey, rawKeyBytes);
+      rawKeyBytes.fill(0);
+      if (state.closed) return;
       const payload = JSON.stringify({ v: state.version, id: state.request.id, wrappedKey: encodeBase64Url(new Uint8Array(wrappedKey)), iv: encodeBase64Url(iv), ciphertext: encodeBase64Url(new Uint8Array(ciphertext)) });
       if (utf8ByteLength(payload) > MAX_SEND_DATA_BYTES) throw new RequestError('invalid');
       if (Date.now() >= state.request.expiresAt) throw new RequestError('expired');
-      for (const input of controls) input.value = '';
+      clearPlaintext();
+      for (const id of Object.keys(values)) delete values[id];
       plainBytes.fill(0);
       rawKeyBytes.fill(0);
       await Promise.resolve(state.telegram.sendData(payload));
+      state.closed = true;
+      state.publicKey = null;
+      clearTimeout(state.expiryTimer);
+      dom.cancelButton.hidden = true;
     } catch (error) {
-      for (const input of controls) input.value = '';
+      if (!state.closed) {
+        state.sending = false;
+        render(error instanceof RequestError && views[error.code] ? error.code : 'sendFailed');
+      }
+    } finally {
+      for (const id of Object.keys(values)) delete values[id];
+      clearPlaintext();
       if (plainBytes) plainBytes.fill(0);
       if (rawKeyBytes) rawKeyBytes.fill(0);
-      state.sending = false; render(error instanceof RequestError && views[error.code] ? error.code : 'sendFailed');
     }
   }
 
@@ -549,14 +677,20 @@
 
     try {
       const publicKey = await importPublicKey(request.publicKey);
+      if (state.closed) return;
+      if (Date.now() >= request.expiresAt) throw new RequestError('expired');
       state.request = request;
       state.version = request.v;
       state.publicKey = publicKey;
       state.telegram = telegram;
-      if (request.v === 3) { renderSecureFields(request); render('secureReady'); }
+      if (request.v === 3) { renderSecureFields(request); render(request.mode === 'payment_confirmation' ? 'paymentBlocked' : 'secureReady'); }
       else render('ready');
+      state.expiryTimer = setTimeout(() => {
+        if (!state.closed) render('expired');
+      }, Math.max(0, request.expiresAt - Date.now()));
       if (typeof telegram.ready === 'function') telegram.ready();
     } catch (error) {
+      if (state.closed) return;
       render(error instanceof RequestError && views[error.code] ? error.code : 'unsupported');
     }
   }
@@ -565,9 +699,25 @@
     event.preventDefault();
     void sendTest();
   });
-  window.addEventListener('pagehide', () => {
-    if (state.request && state.version === 3) for (const field of state.request.fields) { const input = document.getElementById(`field-${field.id}`); if (input) input.value = ''; }
+  function closeRequest() {
+    state.closed = true;
+    state.publicKey = null;
+    clearPlaintext();
+    render('cancelled');
+  }
+  dom.cancelButton.addEventListener('click', () => {
+    closeRequest();
+    try { state.telegram?.close?.(); } catch { /* Closing is best-effort; plaintext is already cleared. */ }
   });
+  dom.form.addEventListener('input', event => {
+    if (event.target.matches('input, textarea, select')) {
+      event.target.setCustomValidity('');
+      event.target.removeAttribute('aria-invalid');
+      const error = document.getElementById(`error-${event.target.id.replace('field-', '')}`);
+      if (error) { error.hidden = true; error.textContent = ''; }
+    }
+  });
+  window.addEventListener('pagehide', closeRequest);
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot, { once: true });
   } else {

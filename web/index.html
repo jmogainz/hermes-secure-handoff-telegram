@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#000000">
     <title>Hermes Secure Handoff Telegram</title>
@@ -11,20 +11,26 @@
   <body>
     <main class="shell">
       <section class="app-card" aria-labelledby="page-title" data-state="loading">
-        <p class="status-kicker sr-only" id="status-kicker" aria-live="polite">Preparing secure check</p>
-        <h1 id="page-title">Check your Telegram connection</h1>
+        <header class="app-header">
+          <p class="status-kicker" id="status-kicker" aria-live="polite">Preparing secure check</p>
+          <h1 id="page-title">Check your Telegram connection</h1>
+          <p class="status-message" id="status-message" aria-live="polite">Loading the one-time connection test.</p>
+        </header>
 
-        <form class="credential-form" id="credential-form" autocomplete="on" novalidate>
+        <form class="credential-form" id="credential-form" autocomplete="on" aria-describedby="status-message" novalidate>
           <div class="secure-details" id="secure-details" hidden>
-            <p class="origin-line"><span>Target</span> <strong id="request-origin"></strong></p>
-            <div class="field-list" id="field-list"></div>
+            <p class="origin-line"><span>Destination</span> <strong id="request-origin"></strong></p>
+            <fieldset id="field-group" aria-label="Requested fields">
+              <legend><span>Requested fields</span><span id="field-count"></span></legend>
+              <div class="field-list" id="field-list"></div>
+            </fieldset>
           </div>
           <button class="send-button" id="send-button" type="submit" hidden>
             <span>Send test</span>
           </button>
+          <button class="cancel-button" id="cancel-button" type="button" hidden>Cancel</button>
         </form>
-
-        <p class="status-message" id="status-message" aria-live="polite">Loading the one-time connection test.</p>
+        <p class="privacy-note" id="privacy-note" hidden></p>
       </section>
     </main>
 

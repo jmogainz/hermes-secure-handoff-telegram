@@ -6,6 +6,7 @@ def test_standard_adapter_classifies_common_login_controls():
 
     assert adapter.name == "generic"
     assert adapter.classify_input({"type": "text", "name": "username", "autocomplete": "username", "aria": ""}) == "text"
+    assert adapter.classify_input({"type": "email", "name": "email", "autocomplete": "username"}) == "email"
     assert adapter.classify_input({"type": "password", "name": "", "autocomplete": "current-password", "aria": ""}) == "password"
     assert adapter.classify_input({"type": "text", "name": "code", "autocomplete": "one-time-code", "aria": ""}) == "otp"
     assert adapter.classify_input({"type": "text", "name": "", "autocomplete": "", "aria": "digit 1 of 6"}) == "otp"

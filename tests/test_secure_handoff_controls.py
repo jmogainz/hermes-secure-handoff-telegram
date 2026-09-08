@@ -24,15 +24,49 @@ class Bot:
 
 
 @pytest.mark.asyncio
-async def test_attaches_to_running_hermes_chrome_without_owning_or_closing_it():
-    controller = SecureHandoffController(Ctx())
-    await controller._ensure_runtime()
-    assert controller._cdp_url == "http://127.0.0.1:9222"
-    assert controller._browser is not None
-    assert controller._browser.contexts
-    await controller._dispose(Session(7, 8, None))
-    with urlopen("http://127.0.0.1:9222/json/version", timeout=3) as response:
-        assert response.status == 200
+async def test_attaches_to_running_hermes_chrome_without_owning_or_closing_it(tmp_path):
+    # Exercise real attach/disconnect against our own temporary CDP browser,
+    # never the operator's running authenticated profile on the default port.
+    import subprocess
+    import time
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as pw:
+        process = subprocess.Popen([
+            pw.chromium.executable_path, "--headless=new", "--no-sandbox",
+            "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
+            f"--user-data-dir={tmp_path}", "--no-first-run", "about:blank",
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        controller = None
+        try:
+            active_port = tmp_path / "DevToolsActivePort"
+            deadline = time.monotonic() + 10
+            while not active_port.exists():
+                assert process.poll() is None and time.monotonic() < deadline
+                await asyncio.sleep(0.05)
+            port = int(active_port.read_text().splitlines()[0])
+            endpoint = f"http://127.0.0.1:{port}"
+            class DisposableCtx(Ctx):
+                def get_config(self, name):
+                    return endpoint if name == "browser_cdp_url" else super().get_config(name)
+            controller = SecureHandoffController(DisposableCtx())
+            await controller._ensure_runtime()
+            assert controller._cdp_url == endpoint
+            assert controller._browser is not None
+            assert controller._browser.contexts
+            await controller._dispose(Session(7, 8, None))
+            with urlopen(endpoint + "/json/version", timeout=3) as response:
+                assert response.status == 200
+            assert process.poll() is None
+        finally:
+            if controller is not None:
+                await controller._dispose(Session(7, 8, None))
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 @pytest.mark.asyncio
@@ -105,7 +139,7 @@ async def test_open_binds_auth_and_publishes_in_existing_session(monkeypatch):
     class Page:
         url = "https://fixture.example/login"
 
-    async def new_session(identity, url, demo=False):
+    async def new_session(identity, url, demo=False, requested_mode=None, lease=None):
         session = Session(*identity, page=Page(), context=SimpleNamespace(close=lambda: None), wake=asyncio.Event())
         controller.sessions[identity] = session
         return session
@@ -132,10 +166,14 @@ async def test_open_binds_auth_and_publishes_in_existing_session(monkeypatch):
     ({"f0": {"label": "Password", "type": "password", "required": True}}, ["Password"]),
     ({"f0": {"label": "One-time code", "type": "otp", "required": True}}, ["One-time code"]),
 ])
-async def test_publication_uses_exact_bound_password_or_otp_controls(metadata, labels):
+async def test_publication_uses_exact_bound_password_or_otp_controls(metadata, labels, monkeypatch):
     controller = SecureHandoffController(Ctx())
     controller.bot = Bot()
     session = Session(7, 8, None, page=SimpleNamespace(url="https://fixture.example/login"), ref_meta=metadata)
+    controller.sessions[(7, 8, None)] = session
+    async def pin(_session):
+        return None
+    monkeypatch.setattr(controller, "_pin_commit_guard", pin)
     result = await controller._present(session, SimpleNamespace(bot=controller.bot))
     assert result["status"] == "waiting_for_handoff"
     assert [field["label"] for field in session.request["fields"]] == labels

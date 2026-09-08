@@ -24,11 +24,7 @@ The canonical deployment is:
 https://hermes-secure-handoff-telegram.vercel.app
 ```
 
-The planned custom domain is:
-
-```text
-https://hermessecurehandoff.xyz
-```
+No custom domain registration or DNS attachment is established by this release.
 
 The domain owner is a trusted code publisher. The page can read a value before it encrypts that value for Hermes. Self-host the Mini App if you do not want to trust the official deployment publisher, especially before entering card fields.
 
@@ -37,9 +33,9 @@ The domain owner is a trusted code publisher. The page can read a value before i
 Any static HTTPS host works. The host must not add a query string, rewrite, or proxy request values.
 
 ```bash
-# From the repository root, using a local Vercel login or a deployment token
-vercel link --yes --project <project-name>
-vercel deploy ./web --prod
+# Link the repository root to a project whose Root Directory is web.
+vercel link --yes --project <project-name> --token "$VERCEL_TOKEN"
+vercel deploy --prod --token "$VERCEL_TOKEN"
 ```
 
 Never upload `.env`, browser profiles, cookies, Hermes session files, or OAuth state. Configure the chosen URL with:
@@ -67,10 +63,13 @@ The frontend accepts:
 
 - v1 fixed connection-test requests;
 - v3 typed `auth` requests;
+- v3 typed `form` requests, with fill-only authority;
 - v3 typed `checkout` requests;
-- v3 field-free `payment_confirmation` requests containing only an explicit confirmation action.
+- legacy v3 `payment_confirmation` metadata is recognized but blocked, with no submit action. Remote purchase execution requires a future immutable transaction-summary protocol.
 
 Checkout requests may contain bounded text, email, phone, number, password, OTP, card number, card expiry, CVC, and select fields. The frontend never receives prefilled values in request metadata.
+
+General forms add textarea, checkbox, radio-as-select, date/time/month/week/local-datetime, URL, search, color and supported range controls. See `../docs/compatibility.md` for exact scope and limitations. Validation failures identify the field and clear entered values; cancellation/expiry/page teardown also scrub entries and prevent delayed encryption from sending.
 
 ## Security boundary
 

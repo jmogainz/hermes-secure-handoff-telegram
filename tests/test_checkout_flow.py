@@ -78,7 +78,7 @@ def update(raw):
 
 
 @pytest.mark.asyncio
-async def test_checkout_requires_fresh_confirmation_before_payment_action(tmp_path):
+async def test_checkout_stops_for_native_transaction_review(tmp_path):
     site = start_demo()
     controller = await disposable_controller(tmp_path)
     controller.loop = asyncio.get_running_loop()
@@ -109,21 +109,12 @@ async def test_checkout_requires_fresh_confirmation_before_payment_action(tmp_pa
                 SimpleNamespace(bot=controller.bot),
             )
 
-        assert session.status == "waiting_for_confirmation"
-        assert session.request["id"] != first_request_id
-        assert session.request["mode"] == "payment_confirmation"
-        assert session.request["fields"] == []
+        assert session.status == "human_action_required"
+        assert session.request is None and session.key is None
         assert await session.page.evaluate("window.__purchaseClicks") == 0
-
-        with pytest.raises(ApplicationHandlerStop):
-            await controller._web_data(
-                update(envelope(session, {"confirm": True})),
-                SimpleNamespace(bot=controller.bot),
-            )
-
-        assert session.status == "submitted"
-        assert await session.page.evaluate("window.__purchaseClicks") == 1
-        assert await session.page.locator("h1").inner_text() == "Purchase accepted"
+        assert await session.page.locator('[autocomplete="cc-number"]').input_value() == values["f0"]
+        assert (await controller._present(session, SimpleNamespace(bot=controller.bot)))["status"] == "human_action_required"
+        assert await session.page.evaluate("window.__purchaseClicks") == 0
     finally:
         if session is not None:
             await controller._close(identity)
@@ -132,51 +123,26 @@ async def test_checkout_requires_fresh_confirmation_before_payment_action(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_checkout_fills_https_child_frame_before_fresh_confirmation(tmp_path):
-    top_site = start_demo()
-    frame_site = start_demo()
+async def test_embedded_checkout_is_rejected_without_publication(tmp_path):
+    top_site, frame_site = start_demo(), start_demo()
     controller = await disposable_controller(tmp_path)
-    controller.loop = asyncio.get_running_loop()
     controller.bot = Bot()
     identity = (7, 8, 42)
-    session = None
     try:
         session = await controller._new_session(identity, top_site.login_url, demo=True)
         await session.page.set_content(
-            f'<main><iframe title="payment fields" src="{frame_site.origin}/checkout-frame"></iframe>'
-            '<button id="pay" type="button" onclick="window.__paymentClicks=(window.__paymentClicks||0)+1;document.body.innerHTML=\'<h1>Payment submitted</h1>\'">Pay</button></main>'
+            f'<main><iframe src="{frame_site.origin}/checkout-frame"></iframe>'
+            '<button type="button" onclick="window.clicks=1">Pay</button></main>'
         )
-        await session.page.frames[-1].wait_for_load_state("domcontentloaded")
-        first = await controller._snapshot(session)
-        assert first["status"] == "waiting_for_handoff"
-        assert session.request["mode"] == "checkout"
         frame = session.page.frames[-1]
-        values = {field["id"]: f"synthetic-{field['type']}" for field in session.request["fields"]}
-
-        with pytest.raises(ApplicationHandlerStop):
-            await controller._web_data(
-                update(envelope(session, {"values": values})),
-                SimpleNamespace(bot=controller.bot),
-            )
-
-        assert session.status == "waiting_for_confirmation"
-        assert await frame.locator('[autocomplete="cc-number"]').input_value() == "synthetic-card_number"
-        assert await frame.locator('[autocomplete="cc-exp"]').input_value() == "synthetic-card_expiry"
-        assert await frame.locator('[autocomplete="cc-csc"]').input_value() == "synthetic-cvc"
-        assert await session.page.evaluate("window.__paymentClicks || 0") == 0
-
-        with pytest.raises(ApplicationHandlerStop):
-            await controller._web_data(
-                update(envelope(session, {"confirm": True})),
-                SimpleNamespace(bot=controller.bot),
-            )
-
-        assert session.status == "submitted"
-        assert await session.page.evaluate("window.__paymentClicks") == 1
-        assert await session.page.locator("h1").inner_text() == "Payment submitted"
+        await frame.wait_for_load_state('domcontentloaded')
+        result = await controller._snapshot(session)
+        assert result['status'] in {'unsupported_stage', 'publication_failed'}
+        assert session.request is None and session.key is None
+        assert not controller.bot.sent
+        assert await frame.locator('input[autocomplete="cc-number"]').input_value() == ''
+        assert not await session.page.evaluate('window.clicks || 0')
     finally:
-        if session is not None:
-            await controller._close(identity)
-        await controller._dispose(session)
+        await controller._close(identity)
         top_site.close()
         frame_site.close()

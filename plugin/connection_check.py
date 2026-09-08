@@ -36,6 +36,7 @@ MAX_WIRE_BYTES = 4096
 RSA_KEY_SIZE = 2048
 RSA_CIPHERTEXT_BYTES = RSA_KEY_SIZE // 8
 MAX_HISTORY = 64
+MAX_RECEIPT_BYTES = 256 * 1024
 HISTORY_TTL_SECONDS = TTL_SECONDS
 PLUGIN_HANDLER_GROUP = -100
 
@@ -123,7 +124,10 @@ def _load_json_object(raw: str, *, parse_limit: int = _MAX_PARSE_BYTES) -> Optio
         if len(raw.encode("utf-8")) > parse_limit:
             return None
         value = json.loads(raw, object_pairs_hook=_json_object)
-    except (UnicodeEncodeError, UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+        # Reject nonstandard constants and overflowed JSON numbers, including
+        # values nested inside arrays. Also bound recursive traversal errors.
+        json.dumps(value, allow_nan=False)
+    except (UnicodeEncodeError, UnicodeDecodeError, TypeError, ValueError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -147,12 +151,10 @@ def _extract_request_id(raw: Any) -> Optional[str]:
 def _parse_ciphertext(raw: Any, expected_id: str) -> Optional[bytes]:
     if not isinstance(raw, str):
         return None
-    if len(raw.encode("utf-8")) > MAX_WIRE_BYTES:
-        return None
     obj = _load_json_object(raw, parse_limit=MAX_WIRE_BYTES)
     if obj is None or set(obj) != {"v", "id", "ciphertext"}:
         return None
-    if obj.get("v") != REQUEST_VERSION or obj.get("id") != expected_id:
+    if type(obj.get("v")) is not int or obj["v"] != REQUEST_VERSION or obj.get("id") != expected_id:
         return None
 
     encoded = obj.get("ciphertext")
@@ -176,12 +178,13 @@ def _parse_ciphertext(raw: Any, expected_id: str) -> Optional[bytes]:
 def _validate_mini_app_url(raw: Any) -> Optional[str]:
     if not isinstance(raw, str) or not raw or len(raw) > _MAX_LAUNCH_URL_CHARS:
         return None
-    if any(character.isspace() for character in raw):
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in raw) or "\\" in raw:
         return None
     try:
         parsed = urlsplit(raw)
         hostname = parsed.hostname
-        _ = parsed.port
+        if parsed.port == 0:
+            return None
     except ValueError:
         return None
     if (
@@ -297,9 +300,16 @@ class ReceiptStore:
                 separators=(",", ":"),
                 sort_keys=True,
             ) + "\n"
+            if len(encoded.encode("utf-8")) > MAX_RECEIPT_BYTES:
+                return
             with self._lock:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as handle:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                    # Rotate in place without reading an arbitrarily large
+                    # existing file or accumulating unbounded backup files.
+                    if os.fstat(handle.fileno()).st_size + len(encoded.encode("utf-8")) > MAX_RECEIPT_BYTES:
+                        handle.truncate(0)
                     handle.write(encoded)
                     handle.flush()
                 try:
@@ -358,6 +368,7 @@ class TelegramSecureHandoffPlugin:
         self._active_by_user: dict[int, str] = {}
         self._history: dict[str, PendingRequest] = {}
         self.receipts = ReceiptStore(ctx)
+        self.secure_controller: Any = None
 
     def _now_ms(self) -> int:
         return int(self._clock() * 1000)
@@ -504,8 +515,11 @@ class TelegramSecureHandoffPlugin:
             return IssueResult("created", request) if request is not None else IssueResult("unavailable")
 
     def _is_matching_origin(self, request: PendingRequest, update: Any) -> bool:
-        identity = _identity_from_update(update)
-        return identity == (request.sender_id, request.chat_id)
+        identity = self._authorized_command_identity(update)
+        thread = getattr(getattr(update, "effective_message", None), "message_thread_id", None)
+        if thread is not None and type(thread) is not int:
+            return False
+        return identity == (request.sender_id, request.chat_id) and thread == request.origin_thread
 
     def _status_text(self, status: str) -> str:
         return {
@@ -654,11 +668,11 @@ class TelegramSecureHandoffPlugin:
         thread_id: Optional[int],
         text: str,
         reply_markup: Any = None,
-    ) -> None:
+    ) -> bool:
         bot = getattr(context, "bot", None)
         send_message = getattr(bot, "send_message", None)
         if not callable(send_message):
-            return
+            return False
         kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if thread_id is not None:
             kwargs["message_thread_id"] = thread_id
@@ -668,10 +682,11 @@ class TelegramSecureHandoffPlugin:
             result = send_message(**kwargs)
             if inspect.isawaitable(result):
                 await result
+            return True
         except Exception:
             # The owned update is still stopped below; a Telegram send error
             # must not fall through to model/generic handlers.
-            return
+            return False
 
     @staticmethod
     def _raise_stop() -> None:
@@ -713,26 +728,34 @@ class TelegramSecureHandoffPlugin:
                 "Connection test — no passwords. Open the button below, "
                 "then tap Send test. Cancel with /handoffcancel."
             )
-            markup = self._keyboard(result.request.launch_url)
         elif result.status == "existing" and result.request is not None:
             text = (
                 "A connection test is already pending. Use the existing "
                 "button, or cancel with /handoffcancel."
             )
-            markup = self._keyboard(result.request.launch_url)
         elif result.status == "cap":
             text = "Connection test unavailable right now; try again later."
-            markup = None
         else:
             text = "Connection test unavailable."
-            markup = None
-        await self._send(
-            context,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            text=text,
-            reply_markup=markup,
-        )
+        sent = False
+        try:
+            markup = self._keyboard(result.request.launch_url) if result.request is not None else None
+            sent = await self._send(
+                context,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                text=text,
+                reply_markup=markup,
+            )
+        except Exception:
+            pass  # Never expose publication errors or fall through to a model.
+        finally:
+            if not sent and result.request is not None:
+                with self._lock:
+                    # An awaited send may overlap cancellation/new issuance.
+                    # Retire only this still-pending request, never its successor.
+                    if self._pending.get(result.request.request_id) is result.request:
+                        self._move_to_history_locked(result.request, "publication_failed", self._now_ms())
         self._raise_stop()
 
     async def handle_handoffcancel(self, update: Any, context: Any) -> None:
@@ -742,13 +765,26 @@ class TelegramSecureHandoffPlugin:
         sender_id, chat_id = identity
         message = getattr(update, "effective_message", None)
         current_thread = _thread_from_message(message)
-        request = self.cancel(sender_id)
+        with self._lock:
+            active_id = self._active_by_user.get(sender_id)
+            active = self._pending.get(active_id) if active_id else None
+            request = self.cancel(sender_id) if active is not None and self._is_matching_origin(active, update) else None
+        secure_cancelled = False
+        if self.secure_controller is not None:
+            try:
+                # The controller independently validates its session's exact
+                # owner/private-chat/thread binding before cancelling it.
+                secure_cancelled = await self.secure_controller.cancel_from_update(update) is True
+            except Exception:
+                pass  # Cancellation errors must not become model input.
         target_thread = request.origin_thread if request is not None and request.chat_id == chat_id else current_thread
         await self._send(
             context,
             chat_id=chat_id,
             thread_id=target_thread,
-            text="Connection test cancelled." if request is not None else "No connection test is pending.",
+            text="Secure handoff cancelled." if secure_cancelled else (
+                "Connection test cancelled." if request is not None else "No connection test is pending."
+            ),
             reply_markup=self._remove_keyboard(),
         )
         self._raise_stop()
@@ -811,7 +847,7 @@ class TelegramSecureHandoffPlugin:
         )
 
 
-def register(ctx: Any) -> None:
+def register(ctx: Any) -> Optional[TelegramSecureHandoffPlugin]:
     """Hermes directory-plugin entry point; invalid config disables wiring."""
 
     config = load_runtime_config(ctx)
@@ -820,7 +856,9 @@ def register(ctx: Any) -> None:
             "Hermes Secure Handoff Telegram connection test disabled: missing or invalid mini_app_url/allowed_user_ids"
         )
         return
-    ctx.register_telegram_handler(TelegramSecureHandoffPlugin(config, ctx).wire)
+    plugin = TelegramSecureHandoffPlugin(config, ctx)
+    ctx.register_telegram_handler(plugin.wire)
+    return plugin
 
 
 __all__ = [

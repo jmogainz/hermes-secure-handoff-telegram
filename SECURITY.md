@@ -9,6 +9,14 @@ general credential manager or payment processor.
 
 ## Deployment boundary
 
+- General forms use encrypted fill-only entry. There is no inferred authorization
+  to click arbitrary submit, save, delete, or payment actions. Input events may
+  still cause destination-owned side effects; the destination origin must be trusted.
+- Ordinary tool results are status-only, not a DOM/body dump. All field entry
+  belongs in the encrypted Mini App; direct tool typing is not a secret channel.
+- Unsupported widgets fail closed. File selection, signatures, native wallets,
+  passkeys, CAPTCHA and 3DS need separately reviewed human-owned capabilities.
+
 - A single official HTTPS frontend deployment may serve every operator because
   it is static and has no shared backend, bot token, account, or database.
 - The operator must choose whether to trust that shared frontend publisher. The
@@ -23,9 +31,10 @@ general credential manager or payment processor.
   it in the Mini App, repository, chat, CLI arguments, or screenshots.
 - Never paste website credentials or one-time codes into Telegram chat, model
   prompts, terminals, logs, receipts, screenshots, or issue reports.
-- Checkout fields are filled only after an encrypted v3 request is accepted.
-  The final purchase action requires a separate fresh confirmation request with
-  no fields. A browser click does not prove that a provider accepted payment.
+- Top-document checkout fields are filled only after an encrypted v3 request
+  is accepted. Final purchase execution and embedded/cross-frame publication
+  are blocked in v1.1. A field-free boolean confirmation lacks bound transaction
+  terms; no claim of payment authorization or completion follows from field fill.
 - CAPTCHA, 3DS, MFA, passkeys, provider security screens, and payment outcomes
   remain user/provider-owned. The plugin never solves or bypasses them.
 - The Mini App uses standard iOS `autocomplete` metadata, but Apple Passwords

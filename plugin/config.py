@@ -17,11 +17,16 @@ def validate_browser_cdp_url(raw: Any) -> Optional[str]:
     bearing, and path/query-bearing endpoints are intentionally rejected.
     """
 
-    value = str(raw or DEFAULT_CDP_URL).strip().rstrip("/")
+    # Only an absent setting selects the default; never repair malformed input.
+    value = DEFAULT_CDP_URL if raw is None else raw
+    if not isinstance(value, str) or not value or len(value) > 4096:
+        return None
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value):
+        return None
     try:
         parsed = urlsplit(value)
         host = parsed.hostname
-        port = parsed.port or 9222
+        port = 9222 if parsed.port is None else parsed.port
     except (TypeError, ValueError):
         return None
     if (
@@ -32,6 +37,7 @@ def validate_browser_cdp_url(raw: Any) -> Optional[str]:
         or parsed.query
         or parsed.fragment
         or parsed.path not in ("", "/")
+        or parsed.netloc.endswith(":")
         or not 1 <= port <= 65535
     ):
         return None

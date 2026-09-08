@@ -2,9 +2,9 @@
 
 Hermes Secure Handoff Telegram is a standalone Hermes plugin and static Telegram Mini App for owner-scoped handoffs into a dedicated local browser profile.
 
-It supports staged authentication, one-time codes, generic checkout forms, registrant and billing fields, card number, expiration, and security-code fields. Checkout uses a second field-free confirmation request before Hermes can activate a bound purchase action.
+It supports staged authentication, one-time codes, encrypted general-form entry, registrant/billing fields, and supported payment fields. Generic forms are fill-only: recognizing a field never authorizes a submission. Checkout ends at a human-owned final transaction review; this release does not execute purchase actions.
 
-The plugin stays provider-neutral. It does not contain selectors, URLs, account names, or site-specific adapters.
+The plugin stays provider-neutral. It does not hardcode provider URLs, account names, or site-specific selectors.
 
 ## What ships
 
@@ -20,7 +20,7 @@ The plugin stays provider-neutral. It does not contain selectors, URLs, account 
 Telegram bot + Hermes gateway
         │
         ├── short-lived encrypted Mini App request
-        │       └── v3 typed auth/checkout fields
+        │       └── v3 typed auth/form/checkout fields
         │
         └── Hermes plugin ── loopback CDP ── dedicated Chrome profile
                                       ~/.hermes/chrome-debug
@@ -35,20 +35,30 @@ Telegram bot + Hermes gateway
 
 ## Supported handoff modes
 
+### General forms
+
+Use `mode: "form"` with `attach` or `present` for explicit encrypted fill-only entry. This is the safe choice for registration, settings, surveys, and forms whose eventual submission has consequences. The Mini App sends strings for typed text, textarea, checkbox, radio-as-select, native select, and supported date/time/URL/color/range controls. `filled` means the fields were applied, not that the form was submitted.
+
+The plugin does not explicitly click Submit, Save, Delete, Pay, or press Enter in this mode. The destination website can still react to ordinary input/change events; fill-only is not a sandbox against a malicious or auto-submitting site. Unsupported, stale, or ambiguous controls fail closed rather than falling back to plaintext browser tools.
+
+See [the compatibility matrix](docs/compatibility.md) for supported control shapes and limits. This is not a claim that every web form or custom widget works.
+
 ### Authentication
 
 The controller can publish a bounded stage containing typed `identifier`, `password`, `one_time_code`, email, phone, and other supported controls. It rebinds after React-style rerenders and mints a fresh request for the next stage.
 
 ### Checkout
 
-The controller recognizes a generic checkout shape from visible semantic fields and a single exact payment action such as `Buy`, `Pay`, `Purchase`, `Place order`, or `Complete purchase`. It can bind fields in the top-level document and eligible visible payment fields inside HTTPS child frames.
+The controller recognizes a generic checkout shape from visible semantic fields and a single exact payment action such as `Buy`, `Pay`, `Purchase`, `Place order`, or `Complete purchase`. Version 1.1 supports top-document controls only. Embedded/cross-frame payment publication is blocked until atomic parent/child authorization is established.
 
 The flow is deliberately two-step:
 
 1. The Mini App submits the typed checkout fields through an encrypted `mode: checkout` request.
 2. Hermes fills the bound browser controls but does not click the purchase action.
-3. Hermes publishes a fresh `mode: payment_confirmation` request containing no fields and accepts only `{ "confirm": true }`.
-4. Hermes revalidates the live checkout and clicks the exact bound action once.
+3. Hermes scrubs the request/key/bindings and returns `human_action_required`.
+4. The user reviews the exact amount, currency, merchant, recurrence and terms in the provider page and completes the transaction there.
+
+Legacy `payment_confirmation` messages are blocked by the Mini App and cannot execute a purchase in the controller. A future remote purchase gate needs a user-visible, immutable transaction summary, not just an origin and a boolean.
 
 A submitted action is not proof that a provider accepted payment. CAPTCHA, 3DS, MFA, passkeys, provider redirects, and final purchase results remain user/provider-owned checkpoints.
 
@@ -90,8 +100,11 @@ hermes plugins install jmogainz/hermes-secure-handoff-telegram \
 
 ### Python package
 
+Build and install the wheel from reviewed source (the commands below do not assume a PyPI release exists):
+
 ```bash
-python -m pip install hermes-telegram-secure-handoff==1.0.0
+python -m build --wheel
+python -m pip install dist/hermes_telegram_secure_handoff-1.1.0-py3-none-any.whl
 hermes plugins enable telegram-secure-handoff
 ```
 
@@ -167,13 +180,15 @@ telegram-secure-handoff doctor
 hermes plugins doctor telegram-secure-handoff --ci
 ```
 
-The controller exposes the `telegram_secure_handoff` tool with `open`, `attach`, `present`, `read`, `click`, `type`, `wait`, and `close`. `open` starts a fresh navigation. Use `attach` or `present` to republish an already-live password, OTP, CAPTCHA, MFA, provider, or checkout stage without reloading it.
+The controller exposes `telegram_secure_handoff`. `open` starts a fresh navigation; never use it to recover an active form. `attach` binds an existing exact HTTPS origin and, when multiple tabs match, an opaque Chrome target ID in `ref`. `present` republishes the attached stage without navigation. Pass `mode: "form"` for encrypted fill-only handling. `read` returns safe status rather than raw page text; `close` releases the handoff, preserving browser tabs. Legacy direct `type`/`click` actions are not a bypass around encrypted entry or authorization.
+
+`/handoffcheck` tests Telegram transport with a fixed non-secret marker. `/handoffcancel` cancels an owner-scoped active handoff or connection test. A status such as `session_missing` is not evidence that a gateway restart is required; attach the intended existing tab first. Installed Python changes require an external gateway reload, whereas a static frontend deployment alone does not.
 
 ## Trust boundary
 
 The official Mini App is shared static code. A shared host cannot read the encrypted payload after `sendData()`, but its JavaScript can read values before encryption. Use a self-hosted deployment if you do not want to trust the official host publisher, especially for card fields.
 
-The secure handoff is transport encryption, not a guarantee that the destination site is honest. Review the target origin and the browser page before confirming a checkout. Keep the Telegram owner allowlist narrow and the Chrome profile dedicated.
+The secure handoff is transport encryption, not a guarantee that the destination site is honest. Review the target origin and the browser page before entering data or approving any transaction. Keep the Telegram owner allowlist narrow and the Chrome profile dedicated.
 
 ## Security exclusions
 

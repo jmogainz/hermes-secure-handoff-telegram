@@ -39,7 +39,7 @@ async def test_native_web_app_data_returns_to_origin_and_never_reaches_observer(
     req = p._pending[metadata['id']]
     ciphertext = req.private_key.public_key().encrypt(b'telegram-roundtrip-ok', padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
     raw = json.dumps({'v': 1, 'id': req.request_id, 'ciphertext': base64.urlsafe_b64encode(ciphertext).rstrip(b'=').decode()})
-    await app.process_update(message(2, None, web_app_data=WebAppData(raw, 'Open connection test')))
+    await app.process_update(message(2, 42, web_app_data=WebAppData(raw, 'Open connection test')))
     assert not observed
     assert sent[-1]['text'] == 'Connection test succeeded.'
     assert sent[-1]['message_thread_id'] == 42
@@ -51,7 +51,7 @@ async def test_native_web_app_data_returns_to_origin_and_never_reaches_observer(
     for line in receipts[0].read_text().splitlines():
         row = json.loads(line)
         assert set(row) <= {'id', 'status', 'created_at', 'expires_at', 'updated_at', 'thread'}
-    await app.process_update(message(3, 99, web_app_data=WebAppData(raw, 'Open connection test')))
+    await app.process_update(message(3, 42, web_app_data=WebAppData(raw, 'Open connection test')))
     assert not observed
     assert sent[-1]['text'] == 'Connection test already used.'
     assert sent[-1]['message_thread_id'] == 42

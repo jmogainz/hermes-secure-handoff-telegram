@@ -118,11 +118,10 @@ try {
 
   await page.goto('about:blank');
   await page.goto(`${base}#request=${b64(JSON.stringify(confirmation))}&tgWebAppVersion=9.6`, { waitUntil: 'networkidle' });
-  assert.match(await page.locator('#page-title').textContent(), /Authorize purchase/);
+  assert.match(await page.locator('#page-title').textContent(), /Review payment in the browser/);
   assert.equal(await page.locator('#field-list input').count(), 0);
-  await page.getByRole('button', { name: 'Authorize purchase' }).click();
-  await page.waitForFunction(() => typeof window.__sent === 'string');
-  assert.deepEqual(await decryptEnvelope(await page.evaluate(() => window.__sent), confirmation.id), { confirm: true });
+  assert.equal(await page.locator('#send-button').isDisabled(), true);
+  assert.equal(await page.evaluate(() => typeof window.__sent), 'undefined');
   console.log('frontend checkout browser test: PASS');
 } finally {
   await browser.close();

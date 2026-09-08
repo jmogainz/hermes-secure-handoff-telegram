@@ -50,6 +50,8 @@ jobs:
         run: python -m pytest tests/ -q -o 'addopts='
       - name: Frontend tests
         run: npm test
+      - name: Telegram SDK and WebCrypto integration
+        run: npm run test:qa-real-sdk
       - name: Build release artifacts
         run: python -m build --sdist --wheel
       - name: Check release artifacts

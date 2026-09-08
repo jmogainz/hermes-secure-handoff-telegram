@@ -1,78 +1,45 @@
-# Hermes Secure Handoff Telegram contract
+# Secure Handoff Contract — v1.1
 
-## Scope
+## Product boundary
 
-Hermes Secure Handoff Telegram provides two Telegram Mini App transports:
+Hermes Secure Handoff Telegram is an encrypted human-entry bridge, not an autonomous form-submission engine. The operator owns one Telegram DM and one dedicated local Chrome profile. The Mini App renders one bounded request; the gateway decrypts only at private apply time. No passwords, OTPs, payment details, field values, cookies, raw DOM or decrypted payloads belong in model tools, logs, receipts, screenshots or memory.
 
-1. a fixed v1 connection check for validating Telegram keyboard delivery;
-2. a v3 encrypted handoff for typed authentication and checkout stages.
+## Modes
 
-The plugin uses the existing Hermes Telegram application. It never starts a second Telegram polling loop and never accepts a bot token as a plugin argument.
+- **v1 connection check:** a fixed synthetic phrase tests RSA-OAEP/Telegram delivery. No credentials.
+- **v3 auth:** one positively classified identifier/password/OTP stage. A bound auth action may be executed only after the human sends the encrypted stage. Split OTP can rely on the site's own final-digit action.
+- **v3 form:** explicit `mode: form`, action label `Fill fields`. General encrypted entry only. No Submit, Save, Delete, Pay or Enter action is executed by the controller.
+- **v3 checkout:** supported billing/payment fields are filled, then the request/key/bindings are scrubbed and the status becomes `human_action_required`.
+- **Legacy v3 payment_confirmation:** recognized for safe rejection/compatibility only. The frontend cannot send it and the controller cannot execute a purchase. An origin plus `confirm: true` is insufficient transaction consent. Remote approval requires a future bound, user-visible amount/currency/merchant/recurrence/terms design.
 
-## v1 connection check
+## Ownership and publication
 
-The private owner-only `/handoffcheck` command sends a keyboard button labelled `Open connection test`. `/handoffcancel` clears the pending check. The request fragment contains a short-lived RSA public key and opaque request ID. The Mini App encrypts only the fixed marker `telegram-roundtrip-ok` with RSA-OAEP SHA-256 and sends it through Telegram `WebApp.sendData()`.
+Only an explicitly configured positive Telegram owner ID in its private DM can call the tool. Callback owner/chat/thread must match the request; omissions and mismatches do not relax scope. `open` starts a fresh navigation. `attach` binds an existing exact HTTPS origin plus optional 32-hex Chrome target ID in `ref`; ambiguous same-origin pages are not guessed. `present` binds/publishes without navigation. A missing session is reported distinctly from an ambiguous target or rejected binding.
 
-The plugin accepts the marker only from the exact owner, private chat, and originating thread that created the request. Requests expire, are single-use, and produce status-only receipts.
+Publication creates a fresh request ID and RSA key. Publication failure invalidates the request and key. Only bounded public metadata and the public key appear in the launch fragment; no current field values are copied. Telegram acceptance is not proof the phone displayed the keyboard.
 
-## v3 secure handoff
+## Private binding and apply
 
-The launch fragment contains public metadata only:
+The controller pins exact top document, frame documents/origins, form/scope, action and control metadata. Generic and checkout controls do not get substituted with lookalikes. Limited auth rerender recovery checks the original document/origin and container/action before rebinding.
 
-```json
-{
-  "v": 3,
-  "id": "sh_<opaque-id>",
-  "publicKey": "<RSA public JWK>",
-  "expiresAt": 0,
-  "origin": "https://target.example",
-  "provider": "generic",
-  "stage": "identifier",
-  "mode": "auth",
-  "actionLabel": "Submit to browser",
-  "fields": [
-    {"id":"f0","label":"Username or email","type":"text","required":true}
-  ],
-  "demo": false
-}
-```
+On encrypted submit:
 
-Supported modes are `auth`, `checkout`, and `payment_confirmation`. Supported field types are `text`, `email`, `tel`, `number`, `password`, `otp`, `card_number`, `card_expiry`, `cvc`, and `select`.
+1. Consume the native `sh_` request namespace before model dispatch, including late/unknown valid IDs.
+2. Check exact callback identity and one-time request state under the session lock.
+3. Validate original document/frame generations before any rebind or decryption.
+4. Decode strict bounded JSON and decrypt authenticated AES-GCM with request ID as AAD.
+5. Validate exact field IDs, string types, required values, checkbox vocabulary, typed formats and select membership.
+6. Recheck expiry and immutable private authority at the synchronous browser mutation boundary before each mutation/event and permitted auth action. Top-document controls only; cross-frame publication is blocked pending a reviewed parent/child commit protocol.
+7. Terminalize once, write only safe status/phase receipts, scrub key/request/bindings and wake the original conversation with status-only context.
 
-`payment_confirmation` requests must contain an empty `fields` array and accept only this decrypted body:
+Cancellation marks the session unusable before waiting for in-flight work to release its lock. Requests are invalidated on cancel, replacement, idle timeout and request deadline. The command `/handoffcancel` cancels the actual secure controller as well as connection tests. Operator browser tabs survive.
 
-```json
-{"confirm":true}
-```
+## Privacy and unavoidable limits
 
-Normal v3 requests accept only:
+The dedicated tool's `read` result is status/origin only. Legacy ordinary `type`/`click` cannot mutate browser state. The plugin is not a sandbox against destination JavaScript, and ordinary input events may autosave or auto-submit. Plaintext briefly exists in the Mini App and gateway to perform the requested entry; strings/native browser memory cannot be guaranteed zeroized.
 
-```json
-{"values":{"f0":"<user-entered-value>"}}
-```
+Static hosting uses no-store, no-referrer, nosniff, restrictive CSP and permissions policy. No analytics, storage, credential server or third-party credential broker is used. The hosting operator can change JavaScript; Telegram's SDK and the target provider remain trust boundaries. Self-hosting remains available.
 
-The server checks exact field IDs, required values, type/length limits, expiry, key binding, AES-GCM authentication, and one-time request use. It never logs the decrypted body.
+## Evidence and limits
 
-## Checkout gate
-
-A checkout stage may include registrant, billing, payment, and select fields. Hermes fills the exact live controls after decrypting the first request, then publishes a fresh confirmation request with a new key and ID. It does not click the bound `Buy`, `Pay`, `Purchase`, `Place order`, or equivalent action until the user submits the field-free confirmation request.
-
-The final action remains subject to live origin, scope, frame, document-generation, visibility, editability, and action-target checks. A click is not proof that a provider accepted a charge.
-
-## Browser and Telegram boundaries
-
-- One positive owner Telegram ID is allowed per Hermes/browser profile.
-- The full `(user, chat, thread)` identity owns each request.
-- CDP accepts only loopback HTTP endpoints.
-- The controller uses the existing dedicated browser context and does not export cookies or storage.
-- Passwords, OTPs, card values, CVCs, CAPTCHA answers, passkeys, MFA values, cookies, tokens, and storage state never enter model messages, logs, screenshots, receipts, or chat.
-- CAPTCHA, 3DS, MFA, passkeys, provider security pages, redirects, and purchase outcomes remain user/provider-owned.
-- The static Mini App is a trusted code-publisher boundary. Self-host it when the official host should not see pre-encryption input.
-
-## Native autofill
-
-The Mini App uses `autocomplete="username"`, `current-password`, `one-time-code`, `cc-number`, `cc-exp`, and `cc-csc` where appropriate. Telegram's iOS WebView may show keyboard, OTP, or Passwords suggestions. Apple still matches saved credentials and payment autofill to the Mini App origin. The target website origin cannot override that rule.
-
-## Status vocabulary
-
-`waiting_for_handoff` means a new Mini App request was published. `waiting_for_confirmation` means checkout fields were applied and the browser is waiting for the separate authorization action. `submitted` means Hermes performed the bound browser action. `stage_submitted` means the page exposed another recognized stage. `rejected` means Hermes failed closed. None of these statuses alone proves authentication or payment success.
+See `docs/compatibility.md` for the field matrix, size limits and unsupported controls. Synthetic Python/Chromium/Mini App/Telegram-dispatch tests are separate from physical iPhone and live-provider verification. A passing fixture, emitted status or HTTP 200 never proves successful authentication or purchase.

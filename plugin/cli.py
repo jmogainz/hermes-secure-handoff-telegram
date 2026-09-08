@@ -28,13 +28,16 @@ PLUGIN_ID = "telegram-secure-handoff"
 def _validate_mini_app_url(raw: str) -> str:
     if not isinstance(raw, str):
         raise ValueError("Mini App URL must be a string")
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in raw) or "\\" in raw:
+        raise ValueError("Mini App URL must not contain control characters or whitespace")
     value = raw.strip().rstrip("/")
     if not value or len(value) > 4096 or any(character.isspace() for character in value):
         raise ValueError("Mini App URL must be a bounded HTTPS origin without whitespace")
     try:
         parsed = urlsplit(value)
         hostname = parsed.hostname
-        _ = parsed.port
+        if parsed.port == 0:
+            raise ValueError("Mini App port must be nonzero")
     except ValueError as exc:
         raise ValueError("Mini App URL is not valid") from exc
     if (
@@ -125,13 +128,12 @@ def _read_plugin_config(key: str):
         ],
         capture=True,
     )
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not lines:
-        return None
     try:
-        return json.loads(lines[-1])
-    except json.JSONDecodeError:
-        return lines[-1]
+        return json.loads(result.stdout)
+    except (TypeError, ValueError, RecursionError):
+        # --json promises one JSON document, not a final-line value after
+        # arbitrary diagnostics. Do not turn malformed output into settings.
+        return None
 
 
 def _browser_ready(cdp_url: str = DEFAULT_CDP_URL) -> bool:
@@ -224,10 +226,17 @@ def setup(args: argparse.Namespace) -> int:
 
 def doctor(args: argparse.Namespace) -> int:
     _require_hermes()
-    plugin_result = _run(["hermes", "plugins", "list"], capture=True)
+    plugin_result = _run(["hermes", "plugins", "list", "--json"], capture=True)
+    try:
+        plugins = json.loads(plugin_result.stdout)
+    except (TypeError, ValueError, RecursionError):
+        plugins = None
+    plugin_listed = isinstance(plugins, list) and any(
+        isinstance(entry, dict) and entry.get("name") == PLUGIN_ID for entry in plugins
+    )
     mini_app_url = _read_plugin_config("mini_app_url")
     user_ids = _read_plugin_config("allowed_user_ids")
-    cdp_raw = _read_plugin_config("browser_cdp_url") or DEFAULT_CDP_URL
+    cdp_raw = _read_plugin_config("browser_cdp_url")
     try:
         validated_url = _validate_mini_app_url(mini_app_url)
     except (TypeError, ValueError):
@@ -236,10 +245,10 @@ def doctor(args: argparse.Namespace) -> int:
         validated_cdp = _validate_browser_cdp_url(cdp_raw)
     except (TypeError, ValueError):
         validated_cdp = None
-    owner_ok = isinstance(user_ids, list) and len(user_ids)==1 and isinstance(user_ids[0],int) and user_ids[0]>0
+    owner_ok = isinstance(user_ids, list) and len(user_ids) == 1 and type(user_ids[0]) is int and user_ids[0] > 0
     browser_ok = bool(validated_cdp and _browser_ready(validated_cdp))
     result = {
-        "plugin_listed": bool(plugin_result.stdout.strip()),
+        "plugin_listed": plugin_listed,
         "mini_app_configured": validated_url is not None,
         "owner_configured": owner_ok,
         "browser_cdp_url": validated_cdp,
@@ -253,7 +262,7 @@ def doctor(args: argparse.Namespace) -> int:
         print(f"One owner configured: {'yes' if result['owner_configured'] else 'no'}")
         print(f"CDP URL valid: {'yes' if validated_cdp else 'no'}")
         print(f"CDP reachable: {'yes' if browser_ok else 'no'}")
-    return 0 if result["mini_app_configured"] and result["owner_configured"] and (not args.strict or browser_ok) else 1
+    return 0 if plugin_listed and validated_cdp and result["mini_app_configured"] and owner_ok and (not args.strict or browser_ok) else 1
 
 
 def build_parser() -> argparse.ArgumentParser:

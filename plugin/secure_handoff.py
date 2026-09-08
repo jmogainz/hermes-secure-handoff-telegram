@@ -36,6 +36,10 @@ SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REF_RE = re.compile(r"^r[0-9a-zA-Z_-]{1,32}$")
 _TARGET_ID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 
+class _AmbiguousTarget(ValueError):
+    """Opaque target lookup failed; never serialize provider exception text."""
+
+
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
@@ -44,9 +48,19 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 def _origin(url: str) -> str:
+    if not isinstance(url, str) or not url or len(url) > 8192 or "\\" in url:
+        raise ValueError("invalid URL")
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        raise ValueError("invalid URL")
     p = urlsplit(url)
-    if p.scheme.lower() != "https" or not p.hostname or p.username or p.password: raise ValueError
-    return f"https://{p.netloc}"
+    port = p.port
+    if (p.scheme.lower() != "https" or not p.hostname or p.username is not None
+        or p.password is not None or port == 0 or p.netloc.endswith(":")):
+        raise ValueError("invalid origin")
+    host = p.hostname.encode("idna").decode("ascii")
+    if "%" in host: raise ValueError("invalid host")
+    if ":" in host: host = f"[{host}]"
+    return f"https://{host}" + (f":{port}" if port is not None and port != 443 else "")
 
 def _validate_v3_fields(fields: list[dict], mode: str) -> None:
     if not isinstance(fields, list):
@@ -88,6 +102,7 @@ def _validate_v3_fields(fields: list[dict], mode: str) -> None:
         if kind == "select":
             if not isinstance(options, list) or not 1 <= len(options) <= 64:
                 raise ValueError("invalid select options")
+            option_ids = set()
             for option in options:
                 if (
                     not isinstance(option, dict)
@@ -99,6 +114,8 @@ def _validate_v3_fields(fields: list[dict], mode: str) -> None:
                     or not option_pattern.fullmatch(option["label"])
                 ):
                     raise ValueError("invalid select option")
+                if option["value"] in option_ids: raise ValueError("duplicate select option")
+                option_ids.add(option["value"])
         elif options is not None:
             raise ValueError("options require select field")
         seen.add(field_id)
@@ -130,16 +147,19 @@ def make_request(
     _origin(origin)
     if not SAFE_TOKEN_RE.fullmatch(stage) or not SAFE_TOKEN_RE.fullmatch(provider):
         raise ValueError("invalid stage")
-    if mode not in {"auth", "checkout", "payment_confirmation"}:
+    if mode not in {"auth", "form", "checkout", "payment_confirmation"}:
         raise ValueError("invalid mode")
     _validate_v3_fields(fields, mode)
     if action_label is None:
         action_label = {
             "auth": "Submit to browser",
+            "form": "Fill fields",
             "checkout": "Review purchase",
             "payment_confirmation": "Authorize purchase",
         }[mode]
     action_label = _validate_action_label(action_label)
+    if mode == "form" and action_label != "Fill fields":
+        raise ValueError("invalid form action")
     version = 3
     request_id = "sh_" + secrets.token_urlsafe(16)
 
@@ -165,17 +185,31 @@ def make_request(
         request["actionLabel"] = action_label
     return request, key
 
+def _strict_json(raw):
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result: raise ValueError("duplicate key")
+            result[key] = value
+        return result
+    def invalid_constant(_value):
+        raise ValueError("invalid constant")
+    return json.loads(raw, object_pairs_hook=object_pairs, parse_constant=invalid_constant)
+
+
 def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
     try:
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-        obj = json.loads(raw, object_pairs_hook=lambda pairs: {k: v for k, v in pairs})
+        if not isinstance(raw, str) or len(raw.encode()) > 4096: raise ValueError
+        obj = _strict_json(raw)
         version = request.get("v")
         if (
             not isinstance(obj, dict)
             or set(obj) != {"v", "id", "wrappedKey", "iv", "ciphertext"}
+            or type(obj["v"]) is not int
             or obj["v"] != version
             or version not in {2, 3}
             or obj["id"] != request["id"]
@@ -193,7 +227,7 @@ def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
         plain = AESGCM(aes).decrypt(iv, ciphertext, request["id"].encode())
         if len(plain) > 2048:
             raise ValueError
-        body = json.loads(plain.decode())
+        body = _strict_json(plain.decode())
         if not isinstance(body, dict):
             raise ValueError
 
@@ -213,6 +247,10 @@ def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
             value = values.get(field["id"], "")
             if not isinstance(value, str) or len(value) > 512 or (field.get("required") and not value):
                 raise ValueError
+            if field["type"] == "checkbox" and (value not in {"true", "false"} or (field.get("required") and value != "true")):
+                raise ValueError
+            if field["type"] == "select" and value not in {option["value"] for option in field.get("options", [])}:
+                raise ValueError
             result[field["id"]] = value
         return result
     except Exception:
@@ -222,9 +260,18 @@ def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
 class Session:
     user: int; chat: int; thread: int|None; page: Any = field(default=None, repr=False); context: Any = field(default=None, repr=False); request: dict|None = None; key: Any = field(default=None, repr=False); site: Any = field(default=None, repr=False); refs: dict[str, Any] = field(default_factory=dict, repr=False); ref_meta: dict[str, dict] = field(default_factory=dict, repr=False); field_parts: dict[str, list[Any]] = field(default_factory=dict, repr=False); field_frames: dict[str, Any] = field(default_factory=dict, repr=False); field_origins: dict[str, str] = field(default_factory=dict, repr=False); field_documents: dict[str, Any] = field(default_factory=dict, repr=False); auto_submit: bool = False; status: str = "open"; mode: str = "auth"; checkout_filled: bool = False; used_ids: set[str] = field(default_factory=set, repr=False); wake: asyncio.Event|None = field(default=None, repr=False); lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False); updated: float = field(default_factory=time.monotonic); document: Any = field(default=None, repr=False); form: Any = field(default=None, repr=False); scope: Any = field(default=None, repr=False); form_action: str = field(default="", repr=False); submit_action: str = field(default="", repr=False); provider: str = "generic"; stage: str = "browser_auth"
 
+    # Generic forms retain their exact native nodes; no same-looking rebind.
+    form_controls: list[dict] = field(default_factory=list, repr=False)
+    requested_mode: str | None = None
+    deadline: Any = field(default=None, repr=False)
+    auth_container: Any = field(default=None, repr=False)
+    commit_guard: Any = field(default=None, repr=False)
+    commit_slots: dict = field(default_factory=dict, repr=False)
+    generation: int = 0
+
 class SecureHandoffController:
     def __init__(self, ctx: Any, *, browser=None, playwright=None, context=None, owns_browser=False):
-        self.ctx=ctx; self.config=load_runtime_config(ctx); self.loop=None; self.bot=None; self.adapter=None; self._playwright=playwright; self._browser=browser; self._context=context; self._owns_browser=owns_browser; self._cdp_url=""; self.sessions={}; self._lock=threading.RLock()
+        self.ctx=ctx; self.config=load_runtime_config(ctx); self.loop=None; self.bot=None; self.adapter=None; self._playwright=playwright; self._browser=browser; self._context=context; self._owns_browser=owns_browser; self._cdp_url=""; self.sessions={}; self._lock=threading.RLock(); self._acquisitions={}
     def _identity(self):
         try:
             from gateway.session_context import get_session_env
@@ -294,25 +341,66 @@ class SecureHandoffController:
                 if target_id is not None and await self._page_target_id(page) != target_id: continue
                 pages.append(page)
             except Exception: continue
-        if len(pages)!=1: raise ValueError("ambiguous target")
+        if len(pages)!=1: raise _AmbiguousTarget
         return pages[0]
-    async def _attach_session(self,ident,origin,target_id=None):
+    def _acquisition_current(self, ident, lease):
+        if lease is not None and self._acquisitions.get(ident) is not lease:
+            raise ValueError("cancelled acquisition")
+
+    async def _attach_session(self,ident,origin,target_id=None,lease=None):
         self._expire()
         if len(self.sessions)>=MAX_SESSIONS and ident not in self.sessions: raise RuntimeError
-        context=await self._shared_context(); page=await self._existing_page(context,origin,target_id); adapter=adapter_for_origin(origin)
-        old=self.sessions.pop(ident,None)
-        if old: await self._dispose(old)
+        context=await self._shared_context()
+        self._acquisition_current(ident, lease)
+        page=await self._existing_page(context,origin,target_id); adapter=adapter_for_origin(origin)
+        self._acquisition_current(ident, lease)
+        if any(other.page is page for key, other in self.sessions.items() if key != ident): raise ValueError("page already leased")
+        old=self.sessions.get(ident)
+        if old: await self._retire_session(old)
+        self._acquisition_current(ident, lease)
         s=Session(*ident,page=page,context=context,wake=asyncio.Event(),provider=adapter.name)
         self.sessions[ident]=s
         return s
     async def _usable_input(self,e):
         try:
             if not await e.is_visible() or not await e.is_enabled() or not await e.is_editable(): return False
-            return await e.evaluate("""e => { const s=getComputedStyle(e); return !e.inert && e.getAttribute('aria-hidden') !== 'true' && !e.disabled && !e.readOnly && s.display !== 'none' && s.visibility !== 'hidden' && s.pointerEvents !== 'none' && Number(s.opacity) > 0 && e.getClientRects().length > 0; }""") is True
+            return await e.evaluate("""e => {
+                if (!e.isConnected || e.disabled || e.readOnly || !e.getClientRects().length) return false;
+                for (let node=e; node; node=node.parentElement) {
+                    const s=getComputedStyle(node);
+                    if (node.inert || node.getAttribute('aria-hidden') === 'true' || s.display === 'none' || s.visibility === 'hidden' || s.pointerEvents === 'none' || Number(s.opacity) <= 0) return false;
+                }
+                return true;
+            }""") is True
         except Exception: return False
+    def _scrub_binding(self, s):
+        if s.deadline:
+            s.deadline.cancel()
+            s.deadline = None
+        s.key = None
+        s.request = None
+        self._reset_binding(s)
+        s.form_controls = []
+        s.document = None
+
+    async def _retire_session(self, s):
+        self._invalidate(s, "cancelled")
+        async with s.lock:
+            self._scrub_binding(s)
+            identity = (s.user, s.chat, s.thread)
+            if self.sessions.get(identity) is s:
+                self.sessions.pop(identity, None)
+            if s.wake: s.wake.set()
+
     def _expire(self):
         for i,s in list(self.sessions.items()):
+            if s.request and s.request["expiresAt"] <= int(time.time()*1000):
+                self._invalidate(s, "expired")
+                if not s.lock.locked(): self._scrub_binding(s)
+                if s.wake: s.wake.set()
             if time.monotonic()-s.updated>IDLE_TTL:
+                self._invalidate(s, "expired")
+                if not s.lock.locked(): self._scrub_binding(s)
                 self.sessions.pop(i,None)
                 if self.loop and self.loop.is_running(): asyncio.create_task(self._dispose(s))
     async def _dispose(self,s):
@@ -329,15 +417,18 @@ class SecureHandoffController:
             except Exception: pass
             self._browser=self._playwright=self._context=None
             self._cdp_url=""
-    async def _new_session(self,ident,url,demo=False):
+    async def _new_session(self,ident,url,demo=False,lease=None):
+        if demo and not (self._owns_browser and self._context is not None):
+            raise ValueError("demo requires an owned synthetic context")
         self._expire()
         if len(self.sessions)>=MAX_SESSIONS: raise RuntimeError
-        context=await self._shared_context(); page=await self._shared_page(context)
-        if demo:
-            try:
-                cdp=await context.new_cdp_session(page); await cdp.send("Security.setIgnoreCertificateErrors", {"ignore": True}); await cdp.detach()
-            except Exception: pass
+        context=await self._shared_context()
+        self._acquisition_current(ident, lease)
+        page=await self._shared_page(context)
+        self._acquisition_current(ident, lease)
+        if any(other.page is page for other in self.sessions.values()): raise ValueError("page already leased")
         await page.goto(url,wait_until="domcontentloaded",timeout=30000)
+        self._acquisition_current(ident, lease)
         origin=_origin(page.url); adapter=adapter_for_origin(origin)
         s=Session(*ident,page=page,context=context,wake=asyncio.Event(),provider=adapter.name); self.sessions[ident]=s; return s
     async def _bind_auth_stage(self, s):
@@ -377,12 +468,27 @@ class SecureHandoffController:
         if (split_otp and not 2 <= len(candidates) <= 8) or (not split_otp and len(candidates)>4): raise ValueError
         if not split_otp and len({k for k,_,_ in candidates}) != len(candidates): raise ValueError
         submit=await self._find_submit(page,form,scope,adapter,allow_missing=split_otp)
+        if submit is not None:
+            action_text = await submit.evaluate("e => (e.innerText || e.getAttribute('value') || e.getAttribute('aria-label') || '').trim().toLowerCase()")
+            if action_text not in {"continue", "next", "sign in", "log in", "login", "verify", "verify code", "submit"}:
+                raise ValueError("not an auth action")
+            # Autofill hints identify data, not the operation. Account deletion
+            # and profile edits also use current-password/username. Ambiguous
+            # actions always remain fill-only, even with those hints.
+            explicit = any(m["autocomplete"] in {"username", "current-password", "one-time-code"} for _, _, m in candidates)
+            if action_text in {"continue", "next", "submit"}:
+                raise ValueError("ambiguous action is fill-only")
+            if any(m["autocomplete"] == "new-password" for _, _, m in candidates):
+                raise ValueError("registration is fill-only")
+            if not explicit and not any(k in {"password", "otp"} for k, _, _ in candidates):
+                raise ValueError("not an auth stage")
         action=await page.evaluate("form => form.action",form) if form else page.url
         submit_action=action
         override=await page.evaluate("button => button.formAction || ''",submit) if submit else ""
         if override: submit_action=override
         if _origin(action)!=_origin(page.url) or _origin(submit_action)!=_origin(page.url): raise ValueError
         s.document=await page.evaluate_handle("() => document"); s.form=form; s.scope=scope; s.form_action=action; s.submit_action=submit_action
+        s.auth_container=await page.evaluate_handle("e => e.closest('dialog, [role=dialog], main') || document.body", candidates[0][1])
         logical=[("otp",candidates[0][1],[element for _,element,_ in candidates])] if split_otp else [(kind,element,[element]) for kind,element,_ in candidates]
         s.stage=adapter.stage_for(tuple(kind for kind,_,_ in logical)).id
         s.mode="auth"; s.refs={}; s.ref_meta={}; s.field_parts={}; s.field_frames={}; s.field_origins={}; s.field_documents={}; s.auto_submit=split_otp and submit is None
@@ -390,7 +496,34 @@ class SecureHandoffController:
         for i,(kind,element,parts) in enumerate(logical):
             field_id=f"f{i}"; s.refs[field_id]=element; s.field_parts[field_id]=parts; s.field_frames[field_id]=page.main_frame; s.field_origins[field_id]=_origin(page.url); s.field_documents[field_id]=s.document; s.ref_meta[field_id]={"label":labels[kind],"type":kind,"required":True}
         if submit is not None: s.refs["submit"]=submit
+    async def _release_guard(self, guard):
+        try: await guard.evaluate("g => {g.revoked=true;}")
+        except Exception: pass
+        finally:
+            try: await guard.dispose()
+            except Exception: pass
+
+    def _invalidate(self, s, status):
+        s.generation += 1
+        s.status = status
+        s.key = None
+        if s.commit_guard is not None:
+            guard, s.commit_guard = s.commit_guard, None
+            asyncio.get_running_loop().create_task(self._release_guard(guard))
+
+    def _current(self, s, generation=None):
+        return (self.sessions.get((s.user,s.chat,s.thread)) is s
+                and s.status not in {"cancelled", "expired"}
+                and (generation is None or generation == s.generation))
+
     def _reset_binding(self, s):
+        if s.commit_guard is not None:
+            guard, s.commit_guard = s.commit_guard, None
+            asyncio.get_running_loop().create_task(self._release_guard(guard))
+        s.commit_slots = {}
+        s.form_controls = []
+        s.auth_container = None
+        s.document = None
         s.refs = {}
         s.ref_meta = {}
         s.field_parts = {}
@@ -562,13 +695,139 @@ class SecureHandoffController:
             s.field_origins[field_id] = candidate["origin"]
             s.field_documents[field_id] = candidate["document"]
 
+    async def _collect_form_controls(self, page):
+        """Read bounded native metadata only, never current values/checked state."""
+        adapter = adapter_for_url(page.url)
+        controls = []
+        scope = form = None
+        # Unsupported visible widgets must not silently disappear from a form.
+        selector = 'input, textarea, select, [contenteditable], [role=textbox], [role=combobox], [role=checkbox], [role=radio], [role=slider], iframe'
+        for locator in await page.locator(selector).all():
+            if not await locator.is_visible():
+                continue
+            tag = (await locator.evaluate("e => e.tagName")).lower()
+            typ = (await locator.get_attribute("type") or "text").lower()
+            if tag == "input" and typ in {"hidden", "button", "submit", "reset", "image"}:
+                continue
+            if not await self._usable_input(locator):
+                # Disabled/inert native controls are not user-editable; custom widgets fail closed.
+                if tag in {"input", "textarea", "select"} and typ != "file":
+                    continue
+                raise ValueError("unsupported control")
+            metadata = {name: await locator.get_attribute(name) or "" for name in
+                        ("name", "autocomplete", "inputmode", "min", "max", "step", "pattern", "maxlength", "multiple", "role")}
+            metadata.update(tag=tag, type=typ)
+            if typ == "range" and any(metadata[k] not in {"", default} for k, default in (("min","0"),("max","100"),("step","1"))):
+                raise ValueError("range domain unsupported")
+            kind = adapter.classify_form_control(metadata)
+            if kind is None or (tag == "select" and await locator.get_attribute("multiple") is not None):
+                raise ValueError("unsupported control")
+            handle = await locator.element_handle()
+            if handle is None:
+                raise ValueError("missing control")
+            current_form = await page.evaluate_handle("e => e.form", handle)
+            has_form = await page.evaluate("f => !!f", current_form)
+            current_scope = current_form if has_form else await page.evaluate_handle("e => e.closest('dialog, [role=dialog], main') || document.body", handle)
+            if scope is None:
+                scope, form = current_scope, current_form if has_form else None
+            elif not await page.evaluate("a => a[0] === a[1]", [scope, current_scope]):
+                raise ValueError("ambiguous form")
+            label = await handle.evaluate("""e => ((e.labels && [...e.labels].map(l => l.textContent || '').join(' ')) || e.getAttribute('aria-label') || e.getAttribute('name') || '').replace(/\\s+/g,' ').trim().slice(0,80)""")
+            field_meta = {"label": label or kind.replace("-", " ").title(), "type": kind,
+                          "required": await locator.get_attribute("required") is not None or await locator.get_attribute("aria-required") == "true"}
+            # Only syntactically bounded metadata is projected; full raw constraints stay private.
+            autocomplete = metadata["autocomplete"]
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", autocomplete):
+                field_meta["autocomplete"] = autocomplete
+            if metadata["inputmode"] in {"text", "numeric", "decimal", "tel", "email"}:
+                field_meta["inputMode"] = metadata["inputmode"]
+            if tag == "select":
+                options = await handle.evaluate("""e => e.options.length > 64 ? null : [...e.options].filter(o => !o.disabled && !(o.parentElement.tagName === 'OPTGROUP' && o.parentElement.disabled)).map(o => ({value: String(o.value), label: (o.textContent || '').trim()}))""")
+                field_meta["options"] = options
+            controls.append({"handle": handle, "metadata": metadata, "field": field_meta})
+            if len(controls) > MAX_FIELDS * 8:
+                raise ValueError("too many controls")
+        if not controls:
+            raise ValueError("no form controls")
+        return controls, form, scope
+
+    async def _bind_form(self, s):
+        page = s.page
+        origin = _origin(page.url)
+        controls, form, scope = await self._collect_form_controls(page)
+        action = await page.evaluate("f => f.action", form) if form else page.url
+        if _origin(action) != origin:
+            raise ValueError("form action origin mismatch")
+        self._reset_binding(s)
+        s.form_controls = controls
+        s.document = await page.evaluate_handle("() => document")
+        s.form, s.scope, s.form_action = form, scope, action
+        s.mode, s.stage = "form", "general_form"
+        radio_groups = {}
+        for control in controls:
+            metadata, field_meta = control["metadata"], dict(control["field"])
+            if metadata["type"] == "radio":
+                name = metadata["name"]
+                if not name:
+                    raise ValueError("unnamed radio group")
+                if name in radio_groups:
+                    field_id = radio_groups[name]
+                    s.field_parts[field_id].append(control["handle"])
+                    s.ref_meta[field_id]["required"] |= field_meta["required"]
+                    s.ref_meta[field_id]["options"].append({"value": f"o{len(s.field_parts[field_id])-1}", "label": field_meta["label"]})
+                    continue
+                field_id = f"f{len(s.ref_meta)}"
+                radio_groups[name] = field_id
+                field_meta["options"] = [{"value": "o0", "label": field_meta["label"]}]
+                field_meta["label"] = "Radio selection"
+            else:
+                field_id = f"f{len(s.ref_meta)}"
+            s.refs[field_id] = control["handle"]
+            s.ref_meta[field_id] = field_meta
+            s.field_parts[field_id] = [control["handle"]]
+            s.field_frames[field_id] = page.main_frame
+            s.field_origins[field_id] = origin
+            s.field_documents[field_id] = s.document
+        for field_id in radio_groups.values():
+            if not 2 <= len(s.field_parts[field_id]) <= 64:
+                raise ValueError("ambiguous radio group")
+        _validate_v3_fields([{"id": key, **meta} for key, meta in s.ref_meta.items()], "form")
+
+    async def _preflight_form(self, s):
+        if s.mode != "form" or s.request.get("mode") != "form" or "submit" in s.refs:
+            raise ValueError("invalid form mode")
+        if s.request["expiresAt"] < int(time.time()*1000) or _origin(s.page.url) != s.request["origin"]:
+            raise ValueError("stale form")
+        if await s.page.evaluate("d => d === document", s.document) is not True:
+            raise ValueError("stale document")
+        controls, form, scope = await self._collect_form_controls(s.page)
+        if len(controls) != len(s.form_controls) or not await s.page.evaluate("a => a[0] === a[1]", [scope, s.scope]):
+            raise ValueError("changed form")
+        action = await s.page.evaluate("f => f.action", form) if form else s.page.url
+        if action != s.form_action or _origin(action) != s.request["origin"]:
+            raise ValueError("changed form action")
+        if s.request["fields"] != [{"id": key, **meta} for key, meta in s.ref_meta.items()]:
+            raise ValueError("changed field metadata")
+        for old, live in zip(s.form_controls, controls):
+            if old["metadata"] != live["metadata"] or old["field"] != live["field"]:
+                raise ValueError("changed control metadata")
+            if not await s.page.evaluate("a => a[0] === a[1] && a[0].isConnected && a[0].ownerDocument === document", [old["handle"], live["handle"]]):
+                raise ValueError("changed control")
+
     async def _bind_stage(self, s):
+        if s.requested_mode == "form":
+            await self._bind_form(s)
+            return
         try:
             await self._bind_checkout(s)
         except Exception:
             self._reset_binding(s)
-            await self._bind_auth_stage(s)
-            s.mode = "auth"
+            try:
+                await self._bind_auth_stage(s)
+                s.mode = "auth"
+            except Exception:
+                self._reset_binding(s)
+                await self._bind_form(s)
 
     async def _related_submit(self, page, form, scope, handle):
         return await page.evaluate("""a => {
@@ -612,12 +871,58 @@ class SecureHandoffController:
             if await self._related_submit(page,form,scope,handle): return handle
         if allow_missing: return None
         raise ValueError
+    async def _deadline_expired(self, s, request_id):
+        if not s.request or s.request["id"] != request_id: return
+        self._invalidate(s, "expired")
+        async with s.lock:
+            if s.request and s.request["id"] == request_id:
+                self._scrub_binding(s)
+                if s.wake: s.wake.set()
+
+    def _arm_deadline(self, s):
+        if s.deadline: s.deadline.cancel()
+        loop = asyncio.get_running_loop()
+        request_id = s.request["id"]
+        delay = max(0, (s.request["expiresAt"] - int(time.time()*1000)) / 1000)
+        s.deadline = loop.call_later(delay, lambda: loop.create_task(self._deadline_expired(s, request_id)))
+
+    async def cancel_from_update(self, update):
+        identity = self._authorized(update)
+        self._acquisitions.pop(identity, None)
+        s = self.sessions.get(identity) if identity else None
+        if s is None:
+            return False
+        self._invalidate(s, "cancelled")
+        async with s.lock:
+            if self.sessions.get(identity) is not s:
+                return False
+            if s.request:
+                s.used_ids.add(s.request["id"])
+            s.key = None
+            s.request = None
+            s.status = "cancelled"
+            self._reset_binding(s)
+            s.form_controls = []
+            s.document = None
+            if s.deadline: s.deadline.cancel(); s.deadline=None
+            self.sessions.pop(identity, None)
+            if s.wake:
+                s.wake.set()
+        # Cancellation releases capabilities, not browser tabs or their state.
+        return True
+
     async def _close(self,ident):
-        s=self.sessions.pop(ident,None)
-        if not s: return {"status":"unavailable"}
-        s.status="cancelled"; s.key=None
-        if s.wake: s.wake.set()
-        await self._dispose(s); return {"status":"closed"}
+        self._acquisitions.pop(ident, None)
+        s=self.sessions.get(ident)
+        if not s: return {"status":"unavailable", "reason":"session_missing"}
+        # Signal cancellation before waiting for any active encrypted apply.
+        self._invalidate(s, "cancelled")
+        async with s.lock:
+            if self.sessions.get(ident) is s: self.sessions.pop(ident,None)
+            self._scrub_binding(s)
+            if s.wake: s.wake.set()
+        await self._dispose(s)
+        return {"status":"closed"}
     async def _auth_stage_detected(self,s):
         try:
             adapter=adapter_for_url(str(getattr(s.page,"url","") or ""))
@@ -628,20 +933,9 @@ class SecureHandoffController:
             return False
         except Exception: return True
     async def _safe_refs(self,s):
-        refs={}; meta={}
-        try:
-            for i,e in enumerate((await s.page.locator("a,button,input:not([type=password]),textarea,select").all())[:64]):
-                try:
-                    if not await e.is_visible(): continue
-                    typ=(await e.get_attribute("type") or "").lower()
-                    if typ in {"hidden","password","email","tel","number"}: continue
-                    ref=f"r{secrets.token_urlsafe(8)}"; handle=await e.element_handle()
-                    if not handle: continue
-                    tag=(await e.evaluate("e => e.tagName")).lower()
-                    refs[ref]=handle; meta[ref]={"tag":tag,"text":"editable" if tag in {"input","textarea","select"} else (await e.inner_text())[:160]}
-                except Exception: pass
-        except Exception: pass
-        s.refs,s.ref_meta=refs,meta; return refs,meta
+        # Never expose ordinary DOM text or editable refs through this tool.
+        s.refs, s.ref_meta = {}, {}
+        return {}, {}
     async def _stage_detected(self, s):
         safe_refs, safe_meta = s.refs, s.ref_meta
         try:
@@ -666,80 +960,97 @@ class SecureHandoffController:
         except Exception:
             s.request = None
             s.key = None
-            s.status = "unsupported_stage"
-            return {"status":"unsupported_stage"}
+            if s.status not in {"cancelled","expired"}: s.status = "unsupported_stage"
+            return {"status":s.status}
     async def _snapshot(self,s):
+        if s.status in {"filled", "human_action_required", "rejected", "cancelled", "expired"}:
+            return {"status": s.status, "url": self._safe_origin(s)}
+        if s.request and s.key and s.status in {"waiting_for_handoff", "waiting_for_confirmation"}:
+            return {"status": s.status, "url": self._safe_origin(s)}
         if await self._stage_detected(s): return await self._ensure_prompt(s)
-        await self._safe_refs(s)
-        try:
-            text=await s.page.evaluate("""() => { const b=document.body.cloneNode(true); b.querySelectorAll('form,input,textarea,select,script,style').forEach(e=>e.remove()); return b.innerText || ''; }""")
-            return {"status":s.status,"url":_origin(s.page.url),"text":text[:4000],"refs":s.ref_meta}
-        except Exception: return {"status":"unavailable"}
+        return {"status": s.status, "url": self._safe_origin(s)}
+
     async def _ordinary(self,s,action,args):
-        if await self._stage_detected(s): return await self._ensure_prompt(s)
-        ref=args.get("ref",""); refs=s.refs
-        if not isinstance(ref,str) or not _REF_RE.fullmatch(ref) or ref not in refs: return {"status":"stale_ref"}
-        try:
-            e=refs[ref]
-            if await s.page.evaluate("a => a[0].ownerDocument !== document || !a[0].isConnected",[e]): return {"status":"stale_ref"}
-            if not await e.is_visible() or not await e.is_enabled(): return {"status":"invalid"}
-            if action=="click": await e.click(timeout=10000)
-            else:
-                text=args.get("text"); typ=(await e.get_attribute("type") or "").lower()
-                if not isinstance(text,str) or len(text)>512: return {"status":"invalid"}
-                if typ in {"password","email","tel","number"}: return {"status":"forbidden"}
-                await e.fill(text,timeout=10000)
-            s.updated=time.monotonic(); return await self._snapshot(s)
-        except Exception: return {"status":"stale_ref"}
+        # No model-authored values or action bypasses in the handoff tool.
+        ref = args.get("ref", "")
+        if isinstance(ref, str) and ref in s.refs:
+            try:
+                if await s.page.evaluate("a => a[0].ownerDocument !== document || !a[0].isConnected", [s.refs[ref]]):
+                    return {"status":"stale_ref"}
+            except Exception:
+                return {"status":"stale_ref"}
+        return {"status":"forbidden"}
+
     async def _run(self,action,args,ident):
+        if args.get("mode") not in {None, "form"}: return {"status":"invalid"}
         self._expire()
         if action=="open":
+            lease = object(); self._acquisitions[ident] = lease
             try: _origin(args.get("url"))
             except Exception: return {"status":"invalid_url"}
-            old=self.sessions.pop(ident,None)
-            if old: await self._dispose(old)
+            old=self.sessions.get(ident)
+            if old: await self._retire_session(old)
             try:
-                s=await self._new_session(ident,args["url"],bool(args.get("demo")))
+                s=await self._new_session(ident,args["url"],lease=lease)
+                s.requested_mode = args.get("mode")
                 return await self._snapshot(s)
             except Exception: return {"status":"unavailable"}
         if action=="attach":
+            lease = object(); self._acquisitions[ident] = lease
             try: origin=_origin(args.get("origin"))
             except Exception: return {"status":"invalid_origin"}
             target_id=args.get("ref")
             if target_id is not None and (not isinstance(target_id,str) or not _TARGET_ID_RE.fullmatch(target_id)): return {"status":"invalid_ref"}
             try:
-                s=await self._attach_session(ident,origin,target_id)
+                s=await self._attach_session(ident,origin,target_id,lease=lease)
+                s.requested_mode = args.get("mode")
                 async with s.lock:
                     await self._bind_stage(s)
                     return await self._present(s,SimpleNamespace(bot=self.bot),False)
+            except _AmbiguousTarget:
+                return {"status":"unsupported_stage", "reason":"ambiguous_target"}
             except Exception:
                 s=self.sessions.get(ident)
-                if s: s.status="unsupported_stage"
-                return {"status":"unsupported_stage"}
+                if s and self._current(s): s.status="unsupported_stage"; self._scrub_binding(s)
+                return {"status":"unsupported_stage", "reason":"binding_rejected"}
         if action=="close": return await self._close(ident)
         s=self.sessions.get(ident)
-        if not s: return {"status":"unavailable"}
+        if not s: return {"status":"unavailable", "reason":"session_missing"}
+        generation = s.generation
         if action=="wait":
-            async with s.lock: s.updated=time.monotonic(); wake=s.wake
+            async with s.lock:
+                if not self._current(s, generation): return {"status":"unavailable", "reason":"session_missing"}
+                s.updated=time.monotonic(); wake=s.wake
             try: await asyncio.wait_for(wake.wait(),max(0,min(int(args.get("timeout",1)),90)))
             except asyncio.TimeoutError: pass
             async with s.lock:
+                if not self._current(s, generation): return {"status":s.status}
                 wake.clear(); return {"status":s.status}
         async with s.lock:
+            if not self._current(s, generation): return {"status":"unavailable", "reason":"session_missing"}
             s.updated=time.monotonic()
             if action=="read": return await self._snapshot(s)
             if action=="present":
+                s.requested_mode = args.get("mode", s.requested_mode)
                 try:
                     await self._bind_stage(s)
                     return await self._present(s,SimpleNamespace(bot=self.bot),False)
                 except Exception:
-                    s.status="unsupported_stage"
-                    return {"status":"unsupported_stage"}
+                    if s.status not in {"cancelled","expired"}: s.status="unsupported_stage"
+                    self._scrub_binding(s)
+                    return {"status":s.status, "reason":"binding_rejected"}
             if action in {"click","type"}: return await self._ordinary(s,action,args)
         return {"status":"invalid"}
     def tool(self,args=None,**kwargs):
+        if args is not None and not isinstance(args, dict): return '{"status":"invalid"}'
         payload=dict(args) if isinstance(args,dict) else dict(kwargs); ident=self._identity()
-        if ident is None or ident[0] not in self._owners(): result={"status":"rejected"}
+        if (set(payload) - {"action","url","origin","mode","ref","text","timeout"}
+            or any(not isinstance(payload[k], str) for k in ("action","url","origin","mode","ref","text") if k in payload)
+            or ("timeout" in payload and (type(payload["timeout"]) is not int or not 0 <= payload["timeout"] <= 90))):
+            return '{"status":"invalid"}'
+        if (ident is None or len(ident) != 3 or type(ident[0]) is not int or type(ident[1]) is not int
+            or ident[0] <= 0 or ident[1] != ident[0] or (ident[2] is not None and (type(ident[2]) is not int or ident[2] <= 0))
+            or ident[0] not in self._owners()): result={"status":"rejected"}
         elif payload.get("action") in {"open","attach","present","read","click","type","wait","close"}: result=self._submit(self._run(payload.get("action"),payload,ident))
         else: result={"status":"invalid"}
         return json.dumps(result,separators=(",",":"))
@@ -760,42 +1071,59 @@ class SecureHandoffController:
         if not isinstance(uid,int) or not isinstance(cid,int) or getattr(chat,"type",None)!="private" or uid not in self._owners(): return None
         t=getattr(getattr(u,"effective_message",None),"message_thread_id",None); return uid,cid,t if isinstance(t,int) else None
     async def _present_confirmation(self,s,c,demo=False):
-        try:
-            s.mode = "payment_confirmation"
-            s.stage = "payment_confirmation"
-            s.request,s.key=make_request(_origin(s.page.url),[],demo,stage=s.stage,provider=s.provider,mode="payment_confirmation",action_label="Authorize purchase")
-            public=self.config.mini_app_url if self.config is not None else None
-            if not isinstance(public,str): raise RuntimeError
-            launch=public.rstrip("/")+"#request="+_b64(json.dumps(s.request,separators=(",",":")).encode())
-            from telegram import KeyboardButton,ReplyKeyboardMarkup,WebAppInfo
-            markup=ReplyKeyboardMarkup([[KeyboardButton("Authorize purchase",web_app=WebAppInfo(url=launch))]],resize_keyboard=True)
-            if not await self._send(c,s.chat,s.thread,"Review the browser checkout, then authorize the purchase.",markup): raise RuntimeError
-            s.status="waiting_for_confirmation"
-            return {"status":"waiting_for_confirmation","url":_origin(s.page.url)}
-        except Exception:
-            s.status="publication_failed"; s.key=None; s.request=None
-            return {"status":"publication_failed"}
+        # Deliberately disabled: origin + confirm=true is not transaction consent.
+        s.status = "human_action_required"
+        s.key = None
+        return {"status":"human_action_required", "url":self._safe_origin(s)}
 
     async def _present(self,s,c,demo=False):
+        if not self._current(s): return {"status":s.status}
+        generation = s.generation
+        if s.status == "human_action_required":
+            return {"status": s.status, "url": self._safe_origin(s)}
         try:
+            if demo and not (self._owns_browser and self._context is not None): raise ValueError("unowned demo")
+            if s.request and s.request["expiresAt"] <= int(time.time()*1000):
+                self._invalidate(s, "expired")
+                raise ValueError("expired publication")
             fields=[{"id":k, **dict(v)} for k,v in s.ref_meta.items() if k.startswith("f")]
-            adapter=adapter_for_url(s.page.url); descriptor=adapter.stage_for(tuple(field["type"] for field in fields), checkout=s.mode=="checkout"); s.stage=descriptor.id; s.provider=adapter.name
-            if s.mode == "checkout":
+            adapter=adapter_for_url(s.page.url); descriptor=adapter.stage_for(tuple(field["type"] for field in fields), checkout=s.mode=="checkout", form=s.mode=="form"); s.stage=descriptor.id; s.provider=adapter.name
+            if s.mode == "form":
+                s.request,s.key=make_request(_origin(s.page.url),fields,demo,stage=descriptor.id,provider=adapter.name,mode="form")
+            elif s.mode == "checkout":
                 s.request,s.key=make_request(_origin(s.page.url),fields,demo,stage=descriptor.id,provider=adapter.name,mode="checkout",action_label="Review purchase")
             else:
                 s.request,s.key=make_request(_origin(s.page.url),fields,demo,stage=descriptor.id,provider=adapter.name)
+            self._arm_deadline(s)
+            await self._pin_commit_guard(s)
+            if not self._current(s, generation): raise ValueError("stale publication")
+            self._assert_active(s)
             public=self.config.mini_app_url if self.config is not None else None
             if not isinstance(public,str): raise RuntimeError
-            launch=public.rstrip("/")+"#request="+_b64(json.dumps(s.request,separators=(",",":")).encode())
+            encoded=json.dumps(s.request,separators=(",",":"),ensure_ascii=False).encode("utf-8")
+            if len(encoded) > 4096: raise ValueError("manifest too large")
+            fragment="#request="+_b64(encoded)
+            if len(fragment.encode("utf-8")) > 8192: raise ValueError("fragment too large")
+            launch=public.rstrip("/")+fragment
             from telegram import KeyboardButton,ReplyKeyboardMarkup,WebAppInfo
             markup=ReplyKeyboardMarkup([[KeyboardButton("Open secure handoff",web_app=WebAppInfo(url=launch))]],resize_keyboard=True)
+            if not self._current(s, generation): raise ValueError("stale publication")
+            self._assert_active(s)
             if not await self._send(c,s.chat,s.thread,f"{descriptor.title} handoff is ready. Submit only to this browser.",markup): raise RuntimeError
-            s.status="waiting_for_handoff"; return {"status":"waiting_for_handoff","url":_origin(s.page.url)}
-        except Exception:
-            s.status="publication_failed"; s.key=None; s.request=None
-            return {"status":"publication_failed"}
+            if not self._current(s, generation): raise ValueError("stale publication")
+            self._assert_active(s)
+            s.generation += 1
+            s.used_ids.clear()
+            s.status="waiting_for_handoff"; self._arm_deadline(s); return {"status":"waiting_for_handoff","url":_origin(s.page.url)}
+        except (Exception, asyncio.CancelledError) as error:
+            if s.status not in {"cancelled","expired"}: s.status="publication_failed"
+            self._scrub_binding(s)
+            if isinstance(error, asyncio.CancelledError): raise
+            return {"status":s.status}
 
     async def _preflight(self,s):
+        if s.mode == "form":
+            return await self._preflight_form(s)
         if s.request["expiresAt"]<int(time.time()*1000) or _origin(s.page.url)!=s.request["origin"]: raise ValueError
         if await s.page.evaluate("d => d === document",s.document) is not True: raise ValueError
         if s.form:
@@ -839,58 +1167,191 @@ class SecureHandoffController:
                     if connected is not True: raise ValueError
                 tag=(await e.evaluate("el => el.tagName")).lower(); typ="select" if tag == "select" else (await e.get_attribute("type") or "text").lower()
                 if typ not in expected_types.get(f["type"],set()): raise ValueError
+                if not await self._usable_input(e): raise ValueError
+                if s.mode == "checkout":
+                    live = await self._control_metadata(e, frame, adapter_for_url(s.page.url))
+                    if live is None or live["kind"] != f["type"] or live["label"] != f["label"] or bool(live["required"]) != f["required"] or live["options"] != f.get("options"):
+                        raise ValueError("changed checkout metadata")
         e=s.refs.get("submit")
         if e is None and s.auto_submit: return
         if not e or not await e.is_visible() or not await e.is_enabled() or not await self._related_submit(s.page,s.form,s.scope,e): raise ValueError
         if await s.page.evaluate("a => !a[0].formAction || a[0].formAction === a[1]",[e,s.submit_action]) is not True: raise ValueError
-    async def _refresh_same_stage(self,s):
-        if s.mode == "payment_confirmation":
-            expected=[(k,v["label"],v["type"],bool(v["required"])) for k,v in s.ref_meta.items() if k.startswith("f")]
-            s.mode = "checkout"
-            try:
-                await self._bind_checkout(s)
-                actual=[(k,s.ref_meta[k]["label"],s.ref_meta[k]["type"],bool(s.ref_meta[k]["required"])) for k in sorted(s.ref_meta) if k.startswith("f")]
-            finally:
-                s.mode = "payment_confirmation"
-                s.stage = "payment_confirmation"
-            if actual != expected: raise ValueError
-            return
-        expected=[(f["label"],f["type"],bool(f["required"])) for f in s.request["fields"]]
-        if s.mode == "checkout":
-            await self._bind_checkout(s)
-        else:
-            await self._bind_auth_stage(s)
-        actual=[(s.ref_meta[k]["label"],s.ref_meta[k]["type"],bool(s.ref_meta[k]["required"])) for k in sorted(s.ref_meta) if k.startswith("f")]
-        if actual!=expected: raise ValueError
+    async def _pin_commit_guard(self, s):
+        """One private browser lease; never expose its nodes or option mappings."""
+        # Cross-frame commits cannot atomically validate the parent authority.
+        # Until that protocol exists, require a top-document stage/remint.
+        if any(frame != s.page.main_frame for frame in s.field_frames.values()):
+            raise ValueError("cross-frame commit unsupported")
+        nodes, slots = [], {}
+        for field_id in s.ref_meta:
+            if not field_id.startswith("f"): continue
+            parts = s.field_parts.get(field_id) or [s.refs[field_id]]
+            slots[field_id] = list(range(len(nodes), len(nodes) + len(parts)))
+            nodes.extend(parts)
+        submit_index = len(nodes) if s.refs.get("submit") else -1
+        if submit_index >= 0: nodes.append(s.refs["submit"])
+        s.commit_slots = slots
+        s.commit_guard = await s.page.evaluate_handle(r"""a => {
+            const {nodes, form, scope, doc, deadline, auth, submitIndex} = a;
+            const origin = location.origin, url = location.href;
+            const attrs = ['id','name','type','autocomplete','inputmode','placeholder',
+                'aria-label','aria-labelledby','aria-describedby','aria-required','role',
+                'min','max','step','pattern','maxlength','minlength','required','multiple',
+                'form','formaction','formmethod','formtarget','formenctype'];
+            const clean = t => String(t || '').replace(/\s+/g,' ').trim();
+            const signature = e => JSON.stringify([e.tagName,
+                attrs.map(k => e.getAttribute(k)),
+                e.labels ? [...e.labels].map(l => clean(l.textContent)) : [],
+                clean(e.getAttribute('aria-labelledby') ? e.getAttribute('aria-labelledby').split(/\s+/).map(id => doc.getElementById(id)?.textContent || '').join(' ') : ''),
+                /^(radio|checkbox|submit|button)$/.test(e.type) ? e.value : null,
+                e.tagName === 'SELECT' ? [...e.options].map(o => [o.value, o.textContent, o.disabled, o.parentElement.disabled || false]) : null,
+                e === nodes[submitIndex] ? clean(e.innerText || e.getAttribute('value') || e.getAttribute('aria-label')) : null]);
+            const scopeOf = e => e.form || e.closest('dialog, [role=dialog], main') || doc.body;
+            const inventory = () => [...doc.querySelectorAll('input,textarea,select,button,[role=button],[contenteditable]')].filter(e => scopeOf(e) === scope || scope.contains(e));
+            let members = inventory();
+            const signatures = nodes.map(signature), positions = nodes.map(e => members.indexOf(e));
+            const forms = nodes.map(e => e.form || null);
+            const formSignature = f => f ? JSON.stringify([f.action,f.method,f.target,f.enctype,f.getAttribute('id'),f.noValidate]) : null;
+            const originalForm = formSignature(form);
+            const scopeSignature = JSON.stringify([scope.tagName,scope.id,scope.getAttribute('role')]);
+            const submitAction = submitIndex < 0 ? null : nodes[submitIndex].formAction || '';
+            const usable = e => {
+                if (!e.isConnected || e.ownerDocument !== doc || !e.getClientRects().length || e.matches(':disabled') || e.readOnly) return false;
+                for (let n=e; n; n=n.parentElement) {
+                    const style=getComputedStyle(n);
+                    if (n.inert || n.getAttribute('aria-hidden') === 'true' || style.display === 'none' || style.visibility !== 'visible' || style.pointerEvents === 'none' || Number(style.opacity) <= 0) return false;
+                }
+                return true;
+            };
+            const setters = new Map([HTMLInputElement, HTMLTextAreaElement, HTMLSelectElement].map(C => [C, Object.getOwnPropertyDescriptor(C.prototype,'value').set]));
+            const checkedSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'checked').set;
+            const dispatch = EventTarget.prototype.dispatchEvent, nativeClick = HTMLElement.prototype.click;
+            const lease = {nodes, revoked:false, deadline, submitIndex};
+            const alive = () => {if (lease.revoked || Date.now() >= lease.deadline || doc !== document || location.origin !== origin || location.href !== url) throw Error('stale lease');};
+            lease.check = (refresh=false) => {
+                alive();
+                if (!scope.isConnected || scope.ownerDocument !== doc || JSON.stringify([scope.tagName,scope.id,scope.getAttribute('role')]) !== scopeSignature ||
+                    (form && (!form.isConnected || form.ownerDocument !== doc)) || formSignature(form) !== originalForm) throw Error('changed scope');
+                const live = inventory(), replacements = new Map();
+                if (live.length !== members.length) throw Error('changed membership');
+                for (let i=0; i<live.length; i++) {
+                    if (live[i] === members[i]) continue;
+                    const n=positions.indexOf(i);
+                    if (!refresh || !auth || !form || n < 0 || n === submitIndex || nodes[n].isConnected || live[i].form !== form || signature(live[i]) !== signatures[n]) throw Error('changed node');
+                    replacements.set(n, live[i]);
+                }
+                const proposed=nodes.map((e,i) => replacements.get(i) || e);
+                for (let i=0; i<proposed.length; i++) {
+                    const e=proposed[i];
+                    if (!e.isConnected || e.ownerDocument !== doc || (e.form || null) !== forms[i] || signature(e) !== signatures[i] ||
+                        !(scopeOf(e) === scope || scope.contains(e)) || (i !== submitIndex && !usable(e))) throw Error('changed semantics');
+                }
+                if (submitIndex >= 0 && (proposed[submitIndex].formAction || '') !== submitAction) throw Error('changed action');
+                for (const [i,e] of replacements) nodes[i]=e;
+                members=live;
+                alive();
+                return true;
+            };
+            lease.commit = ({index,value,click,deadline,autoFinal}) => {
+                lease.deadline=Math.min(lease.deadline,deadline);
+                lease.check(true);
+                const e=nodes[index];
+                if (!e) throw Error('unknown node');
+                if (click) {
+                    if (index !== submitIndex || !auth || !usable(e)) throw Error('unauthorized action');
+                    const r=e.getBoundingClientRect(), hit=doc.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                    if (!hit || !(e === hit || e.contains(hit))) throw Error('covered action');
+                    alive();
+                    nativeClick.call(e);
+                    return true;
+                }
+                if (index === submitIndex || typeof value !== 'string') throw Error('invalid field');
+                let setter;
+                if (e.type === 'checkbox' || e.type === 'radio') setter=checkedSetter;
+                else setter=setters.get(e instanceof HTMLInputElement ? HTMLInputElement : e instanceof HTMLTextAreaElement ? HTMLTextAreaElement : HTMLSelectElement);
+                if (!setter) throw Error('unsupported native control');
+                if (e.tagName === 'SELECT' && ![...e.options].some(o => o.value === value && !o.disabled && !o.parentElement.disabled)) throw Error('unknown option');
+                if (['week','color','range'].includes(e.type)) {
+                    const probe=e.cloneNode(false); setter.call(probe,value);
+                    if (probe.value !== value || !probe.checkValidity()) throw Error('invalid native value');
+                }
+                alive();
+                setter.call(e, e.type === 'radio' ? true : e.type === 'checkbox' ? value === 'true' : value);
+                dispatch.call(e,new Event('input',{bubbles:true}));
+                // Destination handlers can restage or invalidate the lease synchronously.
+                // Never send a second event or mutate a later node without revalidation.
+                if (autoFinal && !e.isConnected) {alive(); return true;}
+                lease.check(true);
+                dispatch.call(e,new Event('change',{bubbles:true}));
+                if (autoFinal && !e.isConnected) {alive(); return true;}
+                lease.check(true);
+                return true;
+            };
+            lease.check();
+            return lease;
+        }""", {"nodes":nodes, "form":s.form, "scope":s.scope, "doc":s.document,
+                 "deadline":s.request["expiresAt"], "auth":s.mode == "auth", "submitIndex":submit_index})
+
+    async def _guarded_commit(self, s, index, value="", *, click=False, auto_final=False):
+        self._assert_active(s)
+        if s.commit_guard is None: raise ValueError("missing commit lease")
+        if await s.commit_guard.evaluate("(g,a) => g.commit(a)", {
+            "index":index, "value":value, "click":click,
+            "deadline":s.request["expiresAt"], "autoFinal":auto_final}) is not True:
+            raise ValueError("commit rejected")
+        self._assert_active(s)
+
+    async def _refresh_same_stage(self, s):
+        self._assert_active(s)
+        if s.commit_guard is None: raise ValueError("missing commit lease")
+        await s.commit_guard.evaluate("g => g.check(true)")
+        self._assert_active(s)
+        if s.mode == "auth":
+            # Only the guard may adopt same-form/same-signature replacement inputs.
+            # Original document, form, scope and action node never change.
+            for field_id, slots in s.commit_slots.items():
+                parts = [await s.commit_guard.evaluate_handle("(g,i) => g.nodes[i]", i) for i in slots]
+                s.field_parts[field_id] = parts
+                s.refs[field_id] = parts[0]
+
     async def _wait_for_auto_submit(self,s,timeout=5.0):
         deadline=time.monotonic()+timeout
         while time.monotonic()<deadline:
-            if not await self._auth_stage_detected(s): return
+            self._assert_active(s)
+            if not await self._auth_stage_detected(s):
+                self._assert_active(s)
+                return
             await asyncio.sleep(0.1)
         raise ValueError
     async def _rebind_or_finish(self,s,c):
+        self._assert_active(s)
+        generation = s.generation
         try: await self._bind_stage(s)
         except Exception:
+            self._assert_active(s)
+            if not self._current(s, generation): raise ValueError("stale continuation")
             s.status="submitted"; s.key=None; return
-        self._receipt(s); s.request=None; s.key=None; s.status="stage_submitted"
+        self._assert_active(s)
+        if not self._current(s, generation): raise ValueError("stale continuation")
+        self._receipt(s); s.status="stage_submitted"
         await self._present(s,c,bool(s.site))
-    async def _fill_bound_field(self,s,field,value):
-        field_id=field["id"]; parts=s.field_parts.get(field_id) or [s.refs[field_id]]
-        if field["type"]=="otp" and len(parts)>1:
-            if len(value)!=len(parts): raise ValueError
-            for index in range(len(parts)):
-                await self._refresh_same_stage(s)
-                await self._preflight(s)
-                current=s.field_parts.get(field_id) or []
-                if len(current)!=len(parts): raise ValueError
-                await current[index].fill(value[index],timeout=10000)
-            return
-        element=s.refs[field_id]
-        tag=(await element.evaluate("el => el.tagName")).lower()
-        if tag == "select":
-            await element.select_option(value=value,timeout=10000)
+    def _assert_active(self, s):
+        if not self._current(s):
+            raise ValueError("inactive session")
+        if not s.request or s.request["expiresAt"] <= int(time.time()*1000):
+            raise ValueError("expired request")
+
+    async def _fill_bound_field(self, s, field, value):
+        self._assert_active(s)
+        slots = s.commit_slots[field["id"]]
+        if field["type"] == "otp" and len(slots) > 1:
+            if len(value) != len(slots): raise ValueError("invalid split code")
+            for i, index in enumerate(slots):
+                await self._guarded_commit(s, index, value[i], auto_final=s.auto_submit and i == len(slots)-1)
+        elif field["type"] == "select" and len(slots) > 1:
+            await self._guarded_commit(s, slots[int(value[1:])], value)
         else:
-            await element.fill(value,timeout=10000)
+            await self._guarded_commit(s, slots[0], value)
 
     async def _web_data(self,u,c):
         raw=getattr(getattr(getattr(u,"effective_message",None),"web_app_data",None),"data",None)
@@ -903,7 +1364,7 @@ class SecureHandoffController:
         if not s: raise ApplicationHandlerStop
         async with s.lock:
             identity=self._authorized(u)
-            if not identity or identity!=(s.user,s.chat,s.thread) or rid in s.used_ids: raise ApplicationHandlerStop
+            if not self._current(s) or not s.request or s.request["id"] != rid or not identity or identity!=(s.user,s.chat,s.thread) or rid in s.used_ids: raise ApplicationHandlerStop
             s.used_ids.add(rid)
             phase="expiry"
             try:
@@ -915,15 +1376,20 @@ class SecureHandoffController:
                 if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
                 if s.mode == "payment_confirmation":
                     if payload.get("confirm") is not True or set(payload) != {"confirm"}: raise ValueError
-                    phase="confirm_click"; await s.refs["submit"].click(timeout=10000)
-                    phase="rebind"; await self._rebind_or_finish(s,c)
+                    # No final purchase execution without a bound, user-visible transaction summary.
+                    s.status="human_action_required"; s.key=None
                 else:
                     phase="fill"
                     for field in s.request["fields"]:
                         if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
+                        if s.mode == "form": await self._preflight_form(s)
                         await self._fill_bound_field(s,field,payload[field["id"]])
                     if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
-                    if s.mode == "checkout":
+                    if s.mode == "form":
+                        await self._preflight_form(s)
+                        self._assert_active(s)
+                        s.status="filled"; s.key=None
+                    elif s.mode == "checkout":
                         s.checkout_filled=True
                         phase="refresh_before_confirmation"; await self._refresh_same_stage(s)
                         phase="preflight_after_fill"; await self._preflight(s)
@@ -934,12 +1400,18 @@ class SecureHandoffController:
                     else:
                         phase="refresh_before_click"; await self._refresh_same_stage(s)
                         phase="preflight_after_fill"; await self._preflight(s)
-                        phase="click"; await s.refs["submit"].click(timeout=10000)
+                        phase="click"; await self._guarded_commit(s, sum(len(v) for v in s.commit_slots.values()), click=True)
                         phase="rebind"; await self._rebind_or_finish(s,c)
-            except Exception: s.status="rejected"; s.key=None; self._receipt(s,phase)
+            except Exception:
+                if s.status not in {"cancelled", "expired"}: s.status="rejected"
+                s.key=None; self._receipt(s,phase)
             self._receipt(s)
+            if s.status in {"filled", "human_action_required", "submitted", "rejected", "cancelled", "expired", "publication_failed"}:
+                self._scrub_binding(s)
             if s.wake: s.wake.set()
         if s.status in {"submitted","stage_submitted"}: await self._send(c,s.chat,s.thread,"Secure handoff action submitted.")
+        elif s.status=="human_action_required": await self._send(c,s.chat,s.thread,"Checkout fields filled. Complete the final purchase directly in the provider page; no purchase action was clicked.")
+        elif s.status=="filled": await self._send(c,s.chat,s.thread,"Secure handoff fields filled. No submit action was clicked.")
         elif s.status=="waiting_for_confirmation": await self._send(c,s.chat,s.thread,"Checkout details are ready. Review the browser page, then authorize the purchase.")
         elif s.status=="rejected": await self._send(c,s.chat,s.thread,"Secure handoff rejected.")
         elif s.status=="publication_failed": await self._send(c,s.chat,s.thread,"Secure handoff unavailable.")
@@ -965,7 +1437,7 @@ class SecureHandoffController:
         except Exception: pass
     async def _wake_session(self,status,user,chat,thread,origin):
         adapter=self.adapter
-        if adapter is None or status not in {"submitted","rejected","waiting_for_handoff","publication_failed","stage_submitted"}: return
+        if adapter is None or status not in {"submitted","filled","human_action_required","rejected","waiting_for_handoff","waiting_for_confirmation","publication_failed","stage_submitted"}: return
         source=SimpleNamespace(chat_id=str(chat),user_id=str(user),thread_id=str(thread) if thread is not None else None)
         try: await self._deliver_wake(adapter,self._wake_text(status,origin),source)
         except Exception: pass
@@ -978,8 +1450,9 @@ class SecureHandoffController:
     def _owns_request_id(self, request_id):
         if not isinstance(request_id,str) or not request_id.startswith("sh_"):
             return False
-        with self._lock:
-            return any(s.request and s.request.get("id")==request_id for s in self.sessions.values())
+        # Reserve this protocol namespace even after expiry/close/replacement.
+        # Late ciphertext is consumed status-only, never offered to another handler.
+        return bool(re.fullmatch(r"sh_[A-Za-z0-9_-]{1,64}", request_id))
     def wire(self,application,adapter=None):
         self.adapter=adapter
         self.loop=asyncio.get_running_loop() if asyncio.get_event_loop().is_running() else self.loop; self.bot=getattr(application,"bot",None)
@@ -995,7 +1468,7 @@ class SecureHandoffController:
     def close(self):
         i=self._identity(); return self._submit(self._close(i)) if i else {"status":"unavailable"}
 
-SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"ref":{"type":"string","description":"Opaque Chrome target ID for attach; ordinary actions use the handoff ref returned by the tool"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90}},"required":["action"],"additionalProperties":False}}
+SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"mode":{"type":"string","enum":["form"],"description":"Explicit fill-only generic form; never clicks submit."},"ref":{"type":"string","description":"Opaque Chrome target ID for attach; ordinary actions use the handoff ref returned by the tool"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90}},"required":["action"],"additionalProperties":False}}
 def register(ctx):
     c=SecureHandoffController(ctx)
     if c.config is not None and len(c.config.allowed_user_ids)!=1:
