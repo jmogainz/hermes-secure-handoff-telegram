@@ -34,6 +34,7 @@ CHECKOUT_ACTIONS = {
 }
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REF_RE = re.compile(r"^r[0-9a-zA-Z_-]{1,32}$")
+_TARGET_ID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
@@ -278,19 +279,27 @@ class SecureHandoffController:
         pages=[p for p in getattr(context,"pages",[]) if not p.is_closed()]
         if pages: return pages[0]
         return await context.new_page()
-    async def _existing_page(self, context, origin):
+    async def _page_target_id(self, page):
+        cdp = await page.context.new_cdp_session(page)
+        try:
+            info = await cdp.send("Target.getTargetInfo")
+            return info.get("targetInfo", {}).get("targetId")
+        finally:
+            await cdp.detach()
+    async def _existing_page(self, context, origin, target_id=None):
         pages=[]
         for page in getattr(context,"pages",[]):
             try:
                 if page.is_closed() or _origin(page.url)!=origin: continue
+                if target_id is not None and await self._page_target_id(page) != target_id: continue
                 pages.append(page)
             except Exception: continue
         if len(pages)!=1: raise ValueError("ambiguous target")
         return pages[0]
-    async def _attach_session(self,ident,origin):
+    async def _attach_session(self,ident,origin,target_id=None):
         self._expire()
         if len(self.sessions)>=MAX_SESSIONS and ident not in self.sessions: raise RuntimeError
-        context=await self._shared_context(); page=await self._existing_page(context,origin); adapter=adapter_for_origin(origin)
+        context=await self._shared_context(); page=await self._existing_page(context,origin,target_id); adapter=adapter_for_origin(origin)
         old=self.sessions.pop(ident,None)
         if old: await self._dispose(old)
         s=Session(*ident,page=page,context=context,wake=asyncio.Event(),provider=adapter.name)
@@ -696,8 +705,10 @@ class SecureHandoffController:
         if action=="attach":
             try: origin=_origin(args.get("origin"))
             except Exception: return {"status":"invalid_origin"}
+            target_id=args.get("ref")
+            if target_id is not None and (not isinstance(target_id,str) or not _TARGET_ID_RE.fullmatch(target_id)): return {"status":"invalid_ref"}
             try:
-                s=await self._attach_session(ident,origin)
+                s=await self._attach_session(ident,origin,target_id)
                 async with s.lock:
                     await self._bind_stage(s)
                     return await self._present(s,SimpleNamespace(bot=self.bot),False)
@@ -984,7 +995,7 @@ class SecureHandoffController:
     def close(self):
         i=self._identity(); return self._submit(self._close(i)) if i else {"status":"unavailable"}
 
-SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"ref":{"type":"string"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90}},"required":["action"],"additionalProperties":False}}
+SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"ref":{"type":"string","description":"Opaque Chrome target ID for attach; ordinary actions use the handoff ref returned by the tool"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90}},"required":["action"],"additionalProperties":False}}
 def register(ctx):
     c=SecureHandoffController(ctx)
     if c.config is not None and len(c.config.allowed_user_ids)!=1:

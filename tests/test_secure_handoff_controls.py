@@ -202,8 +202,9 @@ async def test_attach_targets_existing_nonfirst_page_without_navigation(monkeypa
         async def goto(self, *args, **kwargs):
             self.goto_calls.append((args, kwargs))
 
-    first_page = Page("https://x.example/")
+    first_page = Page("https://popup.example/other")
     target_page = Page("https://popup.example/login")
+    target_page.target_id = "A" * 32
     controller._browser = object()
     controller._context = SimpleNamespace(pages=[first_page, target_page])
 
@@ -216,12 +217,16 @@ async def test_attach_targets_existing_nonfirst_page_without_navigation(monkeypa
         assert session.page is target_page
         return {"status": "waiting_for_handoff"}
 
+    async def page_target_id(page):
+        return getattr(page, "target_id", None)
+
     monkeypatch.setattr(controller, "_bind_auth_stage", bind)
     monkeypatch.setattr(controller, "_present", present)
+    monkeypatch.setattr(controller, "_page_target_id", page_target_id, raising=False)
 
     result = await controller._run(
         "attach",
-        {"origin": "https://popup.example"},
+        {"origin": "https://popup.example", "ref": target_page.target_id},
         identity,
     )
 
