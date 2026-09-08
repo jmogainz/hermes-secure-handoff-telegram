@@ -37,7 +37,7 @@ Telegram bot + Hermes gateway
 
 ### General forms
 
-Use `mode: "form"` with `attach` or `present` for explicit encrypted fill-only entry. This is the safe choice for registration, settings, surveys, and forms whose eventual submission has consequences. The Mini App sends strings for typed text, textarea, checkbox, radio-as-select, native select, and supported date/time/URL/color/range controls. `filled` means the fields were applied, not that the form was submitted.
+Use `mode: "form"` with `attach` or `present` for explicit encrypted fill-only entry. This is the safe choice for registration, settings, surveys, and forms whose eventual submission has consequences. The Mini App sends strings for typed text, textarea, checkbox, radio-as-select, native select, and supported date/time/URL/color/range controls. Native selects with more than 64 enabled choices use a bounded exact-label text entry mode; the option values remain private in the browser and are never put in the Telegram launch URL. `filled` means the fields were applied, not that the form was submitted.
 
 The plugin does not explicitly click Submit, Save, Delete, Pay, or press Enter in this mode. The destination website can still react to ordinary input/change events; fill-only is not a sandbox against a malicious or auto-submitting site. Unsupported, stale, or ambiguous controls fail closed rather than falling back to plaintext browser tools.
 

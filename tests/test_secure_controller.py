@@ -1,11 +1,14 @@
+import json
 import os
 from types import SimpleNamespace
 
 import pytest
 from playwright.async_api import async_playwright
+from telegram.ext import ApplicationHandlerStop
 
 from plugin.secure_handoff import SecureHandoffController
 from plugin.demo_site import start_demo
+from test_checkout_flow import envelope, update
 
 
 class Ctx:
@@ -109,6 +112,77 @@ async def test_checkout_uses_the_active_dialog_and_excludes_background_controls(
         assert await session.page.evaluate(
             "e => e.closest('[role=\\\"dialog\\\"]') !== null", session.refs["submit"]
         ) is True
+    finally:
+        if session is not None:
+            await controller._close(identity)
+        await controller._dispose(session)
+        site.close()
+
+
+@pytest.mark.asyncio
+async def test_checkout_omits_space_separated_autocomplete_from_public_manifest(tmp_path):
+    site = start_demo()
+    controller = await disposable_controller(tmp_path)
+    controller.bot = Bot()
+    identity = (7, 8, 42)
+    session = None
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        await session.page.set_content(
+            '<main><form action="/purchase">'
+            '<label>Street address<input name="address1" type="text" autocomplete="billing address-line1"></label>'
+            '<label>Billing email<input name="email" type="email" autocomplete="email"></label>'
+            '<button type="submit">Buy</button></form></main>'
+        )
+
+        await controller._bind_stage(session)
+        result = await controller._present(session, SimpleNamespace(bot=controller.bot))
+
+        assert result["status"] == "waiting_for_handoff"
+        assert "autocomplete" not in session.request["fields"][0]
+    finally:
+        if session is not None:
+            await controller._close(identity)
+        await controller._dispose(session)
+        site.close()
+
+
+@pytest.mark.asyncio
+async def test_checkout_large_select_uses_private_exact_label_mapping(tmp_path):
+    site = start_demo()
+    controller = await disposable_controller(tmp_path)
+    controller.bot = Bot()
+    identity = (7, 8, 42)
+    session = None
+    options = "".join(f'<option value="country-{i}">Country {i}</option>' for i in range(70))
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        await session.page.set_content(
+            '<main><form action="/purchase">'
+            f'<label>Country<select name="country">{options}</select></label>'
+            '<label>Billing email<input name="email" type="email" autocomplete="email"></label>'
+            '<button type="submit">Buy</button></form></main>'
+        )
+
+        await controller._bind_stage(session)
+        result = await controller._present(session, SimpleNamespace(bot=controller.bot))
+        public_request = json.dumps(session.request)
+
+        assert result["status"] == "waiting_for_handoff"
+        country = session.request["fields"][0]
+        assert country["type"] == "select"
+        assert country["selectionMode"] == "search"
+        assert "options" not in country
+        assert "country-69" not in public_request
+
+        with pytest.raises(ApplicationHandlerStop):
+            await controller._web_data(
+                update(envelope(session, {"values": {"f0": "Country 69", "f1": "synthetic@example.test"}})),
+                SimpleNamespace(bot=controller.bot),
+            )
+
+        assert await session.page.locator("select").input_value() == "country-69"
+        assert session.status == "human_action_required"
     finally:
         if session is not None:
             await controller._close(identity)

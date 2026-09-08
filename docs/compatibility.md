@@ -12,7 +12,7 @@ The protocol is v1 for connection diagnostics and v3 for secure handoff. v2 is r
 | General native form or one form-less scope | Explicit `mode: form`, encrypted fill only | Synthetic real Chromium, typed-control and stale-node regressions |
 | Text, email, phone, number, password, OTP, textarea | Bounded string values | Python + frontend contract tests |
 | Checkbox | Encrypted `"true"` or `"false"`; required checkbox must be true | Python + frontend tests |
-| Native single select | Exact published choices, including empty only if published | Python + frontend tests |
+| Native single select | Exact published choices, including empty only if published; lists with 65–512 enabled choices use private exact-label search entry | Python + frontend contract tests |
 | Radio group | One logical select with opaque choice IDs; no guessed default | Browser fixture + same wire select renderer |
 | Date, time, local datetime, month, week, URL, search, color, range | Native controls and bounded values | Synthetic Chromium; physical iPhone behavior not verified |
 | Checkout details | Top-document encrypted fill; terminal `human_action_required`, no purchase click | Top-document fixtures; embedded frames reject publication |
@@ -27,7 +27,7 @@ The protocol is v1 for connection diagnostics and v3 for secure handoff. v2 is r
 - No arbitrary JavaScript, CSS selectors, plaintext field values or click commands from the model-facing handoff tool. Legacy `type`/`click` return forbidden; `read` is status/origin only.
 - General form binding is top-document only. Multiple candidate scopes, file inputs, multi-select, contenteditable, custom ARIA widgets and ambiguous groups are rejected. Shadow roots, nested/cross-origin general forms and native browser dialogs are not promised.
 - Embedded/cross-frame checkout publication is blocked in v1.1: atomic parent/child commit authorization is not established. No old request may transfer to a replacement form or payment document.
-- Up to 24 logical fields, 64 choices per select, 512 characters per value, 2048 UTF-8 plaintext bytes and 4096 envelope bytes. Oversized forms and long country lists can require a smaller provider stage; the plugin does not silently drop unsupported fields.
+- Up to 24 logical fields, 64 published choices per normal select, 512 enabled choices per private exact-label select, 512 characters per value, 2048 UTF-8 plaintext bytes and 4096 envelope bytes. Large selects must have unique labels after Unicode/whitespace normalization; lists over 512 or ambiguous labels fail closed. The browser-side option values are never published in the Telegram URL.
 - The current wire does not carry arbitrary source min/max/step/pattern constraints. Range is supported only for the Mini App's default 0–100 integer domain; incompatible source ranges fail closed. Source constraints and complex calendars remain a compatibility limit, not a universal-form claim.
 - Filling can trigger the site's own input/change handlers, autosave or automatic submission. The plugin does not explicitly click submit in form/checkout mode, but cannot sandbox hostile destination JavaScript.
 - Final payments are NOT executed. Legacy field-free payment confirmations are blocked because they lack bound amount/currency/merchant/recurrence/terms.

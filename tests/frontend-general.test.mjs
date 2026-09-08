@@ -140,6 +140,21 @@ test('select requires an explicit choice and optional checkbox encrypts false as
   } finally { await page.close(); }
 });
 
+test('large native selects use exact-label entry without publishing option values', async () => {
+  const page = await open(request([field('select', 0, { selectionMode: 'search' }), field('email', 1)]));
+  try {
+    const input = page.locator('#field-f0');
+    assert.equal(await input.evaluate(el => el.tagName.toLowerCase()), 'input');
+    assert.equal(await input.getAttribute('type'), 'text');
+    assert.match(await input.getAttribute('placeholder'), /exact option label/i);
+    await input.fill('Country 69');
+    await page.locator('#field-f1').fill('synthetic@example.test');
+    await page.locator('#send-button').click();
+    await page.waitForFunction(() => window.__sent?.length === 1);
+    assert.deepEqual(await decrypt(await page.evaluate(() => window.__sent[0])), { values: { f0: 'Country 69', f1: 'synthetic@example.test' } });
+  } finally { await page.close(); }
+});
+
 test('submission cleanup covers success, crypto failure, send failure, expiry and missing controls', async () => {
   for (const ending of ['success', 'crypto', 'transport', 'expired', 'oversized', 'missing']) {
     const fields = [field('textarea'), field('checkbox', 1), field('select', 2, { options: [{ value: 'a', label: 'A' }] }), field('color', 3), field('range', 4)];

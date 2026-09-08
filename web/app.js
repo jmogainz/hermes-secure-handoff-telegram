@@ -352,21 +352,26 @@
     const ids = new Set();
     const fieldIdPattern = /^f(?:[0-9]|1[0-9]|2[0-3])$/;
     const safeOption = value => typeof value === 'string' && value.length <= 128 && !/[\x00-\x1f\x7f]/.test(value);
-    const allowedFieldKeys = new Set(['id', 'label', 'type', 'required', 'autocomplete', 'inputMode', 'options']);
+    const allowedFieldKeys = new Set(['id', 'label', 'type', 'required', 'autocomplete', 'inputMode', 'options', 'selectionMode']);
     for (const field of request.fields) {
       if (!field || typeof field !== 'object' || Array.isArray(field) || Object.keys(field).some(key => !allowedFieldKeys.has(key)) || typeof field.id !== 'string' || !fieldIdPattern.test(field.id) || ids.has(field.id)) throw new RequestError('invalid');
       if (typeof field.label !== 'string' || !field.label.trim() || field.label.length > 80 || /[\x00-\x1f\x7f]/.test(field.label) || !FIELD_TYPES.has(field.type)) throw new RequestError('invalid');
       if (typeof field.required !== 'boolean') throw new RequestError('invalid');
       if (field.autocomplete !== undefined && (typeof field.autocomplete !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(field.autocomplete))) throw new RequestError('invalid');
       if (field.inputMode !== undefined && !['text', 'numeric', 'decimal', 'tel', 'email'].includes(field.inputMode)) throw new RequestError('invalid');
+      if (field.selectionMode !== undefined && field.selectionMode !== 'search') throw new RequestError('invalid');
       if (field.type === 'select') {
-        if (!Array.isArray(field.options) || field.options.length < 1 || field.options.length > 64) throw new RequestError('invalid');
-        const values = new Set();
-        for (const option of field.options) {
-          if (!option || typeof option !== 'object' || Array.isArray(option) || Object.keys(option).length !== 2 || !safeOption(option.value) || !safeOption(option.label) || !option.label.trim() || values.has(option.value)) throw new RequestError('invalid');
-          values.add(option.value);
+        if (field.selectionMode === 'search') {
+          if (field.options !== undefined) throw new RequestError('invalid');
+        } else {
+          if (!Array.isArray(field.options) || field.options.length < 1 || field.options.length > 64) throw new RequestError('invalid');
+          const values = new Set();
+          for (const option of field.options) {
+            if (!option || typeof option !== 'object' || Array.isArray(option) || Object.keys(option).length !== 2 || !safeOption(option.value) || !safeOption(option.label) || !option.label.trim() || values.has(option.value)) throw new RequestError('invalid');
+            values.add(option.value);
+          }
         }
-      } else if (field.options !== undefined) {
+      } else if (field.options !== undefined || field.selectionMode !== undefined) {
         throw new RequestError('invalid');
       }
       ids.add(field.id);
@@ -386,6 +391,9 @@
       card_expiry: { name: 'cc-exp', autocomplete: 'cc-exp', inputMode: 'numeric', type: 'text', enterKeyHint: 'next' },
       cvc: { name: 'csc', autocomplete: 'cc-csc', inputMode: 'numeric', type: 'password', enterKeyHint: 'done' },
     };
+    if (field.type === 'select' && field.selectionMode === 'search') {
+      return { name: field.id, autocomplete: 'off', inputMode: 'text', type: 'text', enterKeyHint: 'next' };
+    }
     if (field.type === 'text' && request?.mode === 'auth' && request.stage === 'identifier') {
       return { ...defaults.text, name: 'username', autocomplete: 'username' };
     }
@@ -402,10 +410,11 @@
       const wrapper = document.createElement('div'); wrapper.className = 'field-row';
       const label = document.createElement('label'); label.textContent = field.label; label.htmlFor = `field-${field.id}`;
       if (field.required) { const required = document.createElement('span'); required.textContent = 'Required'; required.className = 'required-mark'; label.appendChild(required); }
-      const select = field.type === 'select';
+      const searchSelect = field.type === 'select' && field.selectionMode === 'search';
+      const select = field.type === 'select' && !searchSelect;
       const input = document.createElement(select ? 'select' : field.type === 'textarea' ? 'textarea' : 'input');
       input.id = `field-${field.id}`;
-      input.name = field.type === 'select' ? field.id : defaultFieldAttributes(field, request).name;
+      input.name = select || searchSelect ? field.id : defaultFieldAttributes(field, request).name;
       input.setAttribute('aria-label', field.label);
       input.setAttribute('aria-describedby', `status-message error-${field.id}`);
       input.required = field.required;
@@ -435,6 +444,7 @@
         input.autocapitalize = 'none';
         input.autocorrect = 'off';
         input.spellcheck = false;
+        if (searchSelect) input.placeholder = 'Type the exact option label shown in the browser';
       }
       wrapper.append(label, input);
       const error = document.createElement('small');
@@ -443,6 +453,7 @@
       wrapper.appendChild(error);
       if (request.demo && field.type === 'text') { const hint = document.createElement('small'); hint.textContent = 'Demo example: demo'; wrapper.appendChild(hint); }
       if (request.demo && field.type === 'password') { const hint = document.createElement('small'); hint.textContent = 'Demo example: demo-pass'; wrapper.appendChild(hint); }
+      if (searchSelect) { const hint = document.createElement('small'); hint.textContent = 'Type the option label exactly as it appears in the browser.'; wrapper.appendChild(hint); }
       dom.fields.appendChild(wrapper);
     }
   }
@@ -466,7 +477,7 @@
     if (value.length > 512) return false;
     if (field.type === 'checkbox') return !field.required || value === 'true';
     if (field.required && !(field.type === 'password' ? value : value.trim())) return false;
-    if (field.type === 'select') return field.options.some(option => option.value === value);
+    if (field.type === 'select') return field.selectionMode === 'search' ? Boolean(value.trim()) : field.options.some(option => option.value === value);
     if (!value) return !input.validity.badInput;
     if (['number', 'range'].includes(field.type)) {
       if (!/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value) || !Number.isFinite(Number(value))) return false;
@@ -605,7 +616,7 @@
         input.setAttribute('aria-invalid', 'true');
         input.setCustomValidity('Check this field. Entries were cleared for privacy.');
         const error = document.getElementById(`error-${field.id}`);
-        error.textContent = { email: 'Enter a valid email address.', url: 'Enter a complete, valid URL.', checkbox: 'Select this required checkbox.', select: 'Choose one of the listed options.' }[field.type] || 'Check this field and enter a valid value.';
+        error.textContent = { email: 'Enter a valid email address.', url: 'Enter a complete, valid URL.', checkbox: 'Select this required checkbox.', select: field.selectionMode === 'search' ? 'Enter the exact option label shown in the browser.' : 'Choose one of the listed options.' }[field.type] || 'Check this field and enter a valid value.';
         error.hidden = false;
         dom.message.textContent = 'Check the highlighted field and enter your details again. All entries were cleared for privacy.';
         input.focus(); input.reportValidity(); return;

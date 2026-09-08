@@ -54,14 +54,14 @@ The controller bounds request size, field count, labels, options, IDs, action la
 - `text`, `email`, `tel`, and `number` cover ordinary form controls.
 - `password` and `otp` cover authentication secrets and one-time codes.
 - `card_number`, `card_expiry`, and `cvc` cover supported payment inputs.
-- `select` covers bounded option lists. Option values remain encrypted when selected.
+- `select` covers native option lists. Up to 64 enabled choices are published as a normal picker; larger lists up to 512 enabled choices use `selectionMode: "search"`, where the user types the exact visible option label and the browser-side value mapping stays private.
 - `textarea`, `checkbox`, `date`, `time`, `datetime-local`, `month`, `week`, `url`, `search`, `color` and `range` extend native generic forms. Radio groups use one `select` with opaque choice IDs.
 
 ## Generic form state machine
 
-`mode: "form"`, `stage: "general_form"`, `actionLabel: "Fill fields"` uses the same encrypted values envelope. Every value is a string; checkbox values are exactly `"true"` or `"false"`. A required checkbox must be true. Select values must occur in published options, including empty values. The controller binds one exact native form or form-less scope, fills its supported controls without a submit/click/Enter action, then returns `filled`. Current values/defaults are never published. Unsupported/ambiguous controls and changed node identities fail closed. Website-owned input/change handlers can still run.
+`mode: "form"`, `stage: "general_form"`, `actionLabel: "Fill fields"` uses the same encrypted values envelope. Every value is a string; checkbox values are exactly `"true"` or `"false"`. A required checkbox must be true. Normal select values must occur in published options, including empty values. A large native select uses `selectionMode: "search"` and is resolved against a private, immutable option map by normalized exact label; duplicate labels fail closed. The controller binds one exact native form or form-less scope, fills its supported controls without a submit/click/Enter action, then returns `filled`. Current values/defaults and large-select option values are never published. Unsupported/ambiguous controls and changed node identities fail closed. Website-owned input/change handlers can still run.
 
-Bounds: 24 logical fields, 64 select options, 512 characters per value, 2048 UTF-8 plaintext bytes, 4096 envelope bytes. Source min/max/step/pattern constraints are not part of this wire revision.
+Bounds: 24 logical fields, 64 published select options, 512 private enabled options for exact-label selects, 512 characters per value, 2048 UTF-8 plaintext bytes, 4096 envelope bytes. Source min/max/step/pattern constraints are not part of this wire revision.
 
 A browser adapter can classify these types from standard control semantics: `autocomplete`, `name`, `id`, accessible label, placeholder, input mode, and native input type. The core has no named-site selectors or provider branches.
 

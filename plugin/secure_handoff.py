@@ -1,7 +1,7 @@
 """Bounded, owner-scoped Hermes Secure Handoff Telegram controller."""
 from __future__ import annotations
 
-import asyncio, base64, inspect, json, re, secrets, threading, time
+import asyncio, base64, inspect, json, re, secrets, threading, time, unicodedata
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +21,7 @@ IDLE_TTL = 1800
 MAX_SESSIONS = 4
 PLUGIN_HANDLER_GROUP = -100
 MAX_FIELDS = 24
+MAX_SELECT_OPTIONS = 512
 FIELD_TYPES = SUPPORTED_FIELD_TYPES
 CHECKOUT_ACTIONS = {
     "buy",
@@ -35,6 +36,7 @@ CHECKOUT_ACTIONS = {
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REF_RE = re.compile(r"^r[0-9a-zA-Z_-]{1,32}$")
 _TARGET_ID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+_SAFE_OPTION_RE = re.compile(r"^[^\x00-\x1f\x7f]{0,128}$")
 
 class _AmbiguousTarget(ValueError):
     """Opaque target lookup failed; never serialize provider exception text."""
@@ -62,6 +64,34 @@ def _origin(url: str) -> str:
     if ":" in host: host = f"[{host}]"
     return f"https://{host}" + (f":{port}" if port is not None and port != 443 else "")
 
+
+def _normalise_option_label(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+
+
+def _validate_private_select_options(options: list[dict]) -> None:
+    if not isinstance(options, list) or not 1 <= len(options) <= MAX_SELECT_OPTIONS:
+        raise ValueError("invalid select options")
+    seen_values: set[str] = set()
+    seen_labels: set[str] = set()
+    for option in options:
+        if (
+            not isinstance(option, dict)
+            or set(option) != {"value", "label"}
+            or not isinstance(option["value"], str)
+            or not isinstance(option["label"], str)
+            or not _SAFE_OPTION_RE.fullmatch(option["value"])
+            or not _SAFE_OPTION_RE.fullmatch(option["label"])
+            or not option["label"].strip()
+            or option["value"] in seen_values
+        ):
+            raise ValueError("invalid select option")
+        normalised = _normalise_option_label(option["label"])
+        if not normalised or normalised in seen_labels:
+            raise ValueError("ambiguous select option labels")
+        seen_values.add(option["value"])
+        seen_labels.add(normalised)
+
 def _validate_v3_fields(fields: list[dict], mode: str) -> None:
     if not isinstance(fields, list):
         raise ValueError("invalid fields")
@@ -77,7 +107,7 @@ def _validate_v3_fields(fields: list[dict], mode: str) -> None:
     for field in fields:
         if not isinstance(field, dict):
             raise ValueError("invalid field")
-        if set(field) - {"id", "label", "type", "required", "autocomplete", "inputMode", "options"}:
+        if set(field) - {"id", "label", "type", "required", "autocomplete", "inputMode", "options", "selectionMode"}:
             raise ValueError("invalid field")
         field_id = field.get("id")
         label = field.get("label")
@@ -98,26 +128,33 @@ def _validate_v3_fields(fields: list[dict], mode: str) -> None:
         input_mode = field.get("inputMode")
         if input_mode is not None and input_mode not in {"text", "numeric", "decimal", "tel", "email"}:
             raise ValueError("invalid input mode")
+        selection_mode = field.get("selectionMode")
+        if selection_mode is not None and selection_mode != "search":
+            raise ValueError("invalid selection mode")
         options = field.get("options")
         if kind == "select":
-            if not isinstance(options, list) or not 1 <= len(options) <= 64:
-                raise ValueError("invalid select options")
-            option_ids = set()
-            for option in options:
-                if (
-                    not isinstance(option, dict)
-                    or set(option) != {"value", "label"}
-                    or not isinstance(option["value"], str)
-                    or not isinstance(option["label"], str)
-                    or not option["label"].strip()
-                    or not option_pattern.fullmatch(option["value"])
-                    or not option_pattern.fullmatch(option["label"])
-                ):
-                    raise ValueError("invalid select option")
-                if option["value"] in option_ids: raise ValueError("duplicate select option")
-                option_ids.add(option["value"])
-        elif options is not None:
-            raise ValueError("options require select field")
+            if selection_mode == "search":
+                if options is not None:
+                    raise ValueError("search select cannot publish options")
+            else:
+                if not isinstance(options, list) or not 1 <= len(options) <= 64:
+                    raise ValueError("invalid select options")
+                option_ids = set()
+                for option in options:
+                    if (
+                        not isinstance(option, dict)
+                        or set(option) != {"value", "label"}
+                        or not isinstance(option["value"], str)
+                        or not isinstance(option["label"], str)
+                        or not option["label"].strip()
+                        or not option_pattern.fullmatch(option["value"])
+                        or not option_pattern.fullmatch(option["label"])
+                    ):
+                        raise ValueError("invalid select option")
+                    if option["value"] in option_ids: raise ValueError("duplicate select option")
+                    option_ids.add(option["value"])
+        elif options is not None or selection_mode is not None:
+            raise ValueError("selection metadata requires select field")
         seen.add(field_id)
 
 
@@ -249,8 +286,9 @@ def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
                 raise ValueError
             if field["type"] == "checkbox" and (value not in {"true", "false"} or (field.get("required") and value != "true")):
                 raise ValueError
-            if field["type"] == "select" and value not in {option["value"] for option in field.get("options", [])}:
-                raise ValueError
+            if field["type"] == "select":
+                if field.get("selectionMode") != "search" and value not in {option["value"] for option in field.get("options", [])}:
+                    raise ValueError
             result[field["id"]] = value
         return result
     except Exception:
@@ -262,6 +300,7 @@ class Session:
 
     # Generic forms retain their exact native nodes; no same-looking rebind.
     form_controls: list[dict] = field(default_factory=list, repr=False)
+    select_options: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     requested_mode: str | None = None
     deadline: Any = field(default=None, repr=False)
     auth_container: Any = field(default=None, repr=False)
@@ -522,6 +561,7 @@ class SecureHandoffController:
             asyncio.get_running_loop().create_task(self._release_guard(guard))
         s.commit_slots = {}
         s.form_controls = []
+        s.select_options = {}
         s.auth_container = None
         s.document = None
         s.refs = {}
@@ -535,6 +575,23 @@ class SecureHandoffController:
         s.form_action = ""
         s.submit_action = ""
         s.auto_submit = False
+
+    async def _select_option_metadata(self, element):
+        return await element.evaluate(
+            """(e, limit) => {
+                let count = 0;
+                const options = [];
+                for (const option of e.options) {
+                    if (option.disabled || (option.parentElement && option.parentElement.disabled)) continue;
+                    count += 1;
+                    if (options.length < limit) {
+                        options.push({value: String(option.value), label: String(option.textContent || '').trim()});
+                    }
+                }
+                return {count, options};
+            }""",
+            MAX_SELECT_OPTIONS + 1,
+        )
 
     async def _control_metadata(self, element, frame, adapter):
         tag = (await element.evaluate("e => e.tagName")).lower()
@@ -566,9 +623,17 @@ class SecureHandoffController:
                 "tel": "Phone",
                 "select": "Selection",
             }.get(kind, kind.replace("_", " ").title())
-        options = None
+        options = all_options = None
+        option_count = None
         if tag == "select":
-            options = await element.evaluate("e => [...e.options].slice(0, 64).map(o => ({value: String(o.value), label: String(o.textContent || '').trim()}))")
+            option_data = await self._select_option_metadata(element)
+            option_count = option_data.get("count") if isinstance(option_data, dict) else None
+            all_options = option_data.get("options") if isinstance(option_data, dict) else None
+            if not isinstance(option_count, int) or not isinstance(all_options, list) or option_count != len(all_options) or option_count > MAX_SELECT_OPTIONS:
+                raise ValueError("invalid select options")
+            options = all_options[:64]
+            if option_count > 64:
+                _validate_private_select_options(all_options)
         return {
             "kind": kind,
             "label": label,
@@ -576,6 +641,8 @@ class SecureHandoffController:
             "autocomplete": metadata["autocomplete"] or None,
             "inputMode": metadata["inputmode"] or None,
             "options": options,
+            "all_options": all_options,
+            "option_count": option_count,
             "metadata": metadata,
             "frame": frame,
         }
@@ -708,14 +775,19 @@ class SecureHandoffController:
                 "type": candidate["kind"],
                 "required": bool(candidate["required"]),
             }
-            if candidate["autocomplete"]:
+            if candidate["autocomplete"] and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", candidate["autocomplete"]):
                 metadata["autocomplete"] = candidate["autocomplete"]
-            if candidate["inputMode"]:
+            if candidate["inputMode"] in {"text", "numeric", "decimal", "tel", "email"}:
                 metadata["inputMode"] = candidate["inputMode"]
-            if candidate["options"] is not None:
-                metadata["options"] = candidate["options"]
+            if candidate["kind"] == "select":
+                if candidate["option_count"] > 64:
+                    metadata["selectionMode"] = "search"
+                else:
+                    metadata["options"] = candidate["options"]
             s.refs[field_id] = candidate["handle"]
             s.ref_meta[field_id] = metadata
+            if candidate["kind"] == "select":
+                s.select_options[field_id] = list(candidate["all_options"])
             s.field_parts[field_id] = [candidate["handle"]]
             s.field_frames[field_id] = candidate["frame"]
             s.field_origins[field_id] = candidate["origin"]
@@ -767,10 +839,18 @@ class SecureHandoffController:
                 field_meta["autocomplete"] = autocomplete
             if metadata["inputmode"] in {"text", "numeric", "decimal", "tel", "email"}:
                 field_meta["inputMode"] = metadata["inputmode"]
+            select_options = None
             if tag == "select":
-                options = await handle.evaluate("""e => e.options.length > 64 ? null : [...e.options].filter(o => !o.disabled && !(o.parentElement.tagName === 'OPTGROUP' && o.parentElement.disabled)).map(o => ({value: String(o.value), label: (o.textContent || '').trim()}))""")
-                field_meta["options"] = options
-            controls.append({"handle": handle, "metadata": metadata, "field": field_meta})
+                option_data = await self._select_option_metadata(handle)
+                if not isinstance(option_data, dict) or option_data.get("count") != len(option_data.get("options", [])):
+                    raise ValueError("invalid select options")
+                select_options = list(option_data["options"])
+                if len(select_options) > 64:
+                    _validate_private_select_options(select_options)
+                    field_meta["selectionMode"] = "search"
+                else:
+                    field_meta["options"] = select_options
+            controls.append({"handle": handle, "metadata": metadata, "field": field_meta, "select_options": select_options})
             if len(controls) > MAX_FIELDS * 8:
                 raise ValueError("too many controls")
         if not controls:
@@ -810,6 +890,8 @@ class SecureHandoffController:
                 field_id = f"f{len(s.ref_meta)}"
             s.refs[field_id] = control["handle"]
             s.ref_meta[field_id] = field_meta
+            if control.get("select_options") is not None:
+                s.select_options[field_id] = list(control["select_options"])
             s.field_parts[field_id] = [control["handle"]]
             s.field_frames[field_id] = page.main_frame
             s.field_origins[field_id] = origin
@@ -837,6 +919,8 @@ class SecureHandoffController:
         for old, live in zip(s.form_controls, controls):
             if old["metadata"] != live["metadata"] or old["field"] != live["field"]:
                 raise ValueError("changed control metadata")
+            if old.get("select_options") != live.get("select_options"):
+                raise ValueError("changed select options")
             if not await s.page.evaluate("a => a[0] === a[1] && a[0].isConnected && a[0].ownerDocument === document", [old["handle"], live["handle"]]):
                 raise ValueError("changed control")
 
@@ -1196,8 +1280,14 @@ class SecureHandoffController:
                 if not await self._usable_input(e): raise ValueError
                 if s.mode == "checkout":
                     live = await self._control_metadata(e, frame, adapter_for_url(s.page.url))
-                    if live is None or live["kind"] != f["type"] or live["label"] != f["label"] or bool(live["required"]) != f["required"] or live["options"] != f.get("options"):
+                    if live is None or live["kind"] != f["type"] or live["label"] != f["label"] or bool(live["required"]) != f["required"]:
                         raise ValueError("changed checkout metadata")
+                    if f.get("selectionMode") == "search":
+                        pinned = s.select_options.get(field_id)
+                        if live["option_count"] is None or live["option_count"] <= 64 or pinned is None or live["all_options"] != pinned:
+                            raise ValueError("changed checkout options")
+                    elif f["type"] == "select" and (live["option_count"] != len(f.get("options", [])) or live["options"] != f.get("options")):
+                        raise ValueError("changed checkout options")
         e=s.refs.get("submit")
         if e is None and s.auto_submit: return
         if not e or not await e.is_visible() or not await e.is_enabled() or not await self._related_submit(s.page,s.form,s.scope,e): raise ValueError
@@ -1379,6 +1469,23 @@ class SecureHandoffController:
         else:
             await self._guarded_commit(s, slots[0], value)
 
+    def _resolve_search_select_value(self, s, field, value):
+        if not isinstance(value, str) or field.get("selectionMode") != "search":
+            return value
+        options = s.select_options.get(field["id"])
+        if not isinstance(options, list):
+            raise ValueError("missing select options")
+        if not value.strip():
+            if field.get("required"):
+                raise ValueError("required select")
+            matches = [option for option in options if option["value"] == ""]
+        else:
+            wanted = _normalise_option_label(value)
+            matches = [option for option in options if _normalise_option_label(option["label"]) == wanted]
+        if len(matches) != 1:
+            raise ValueError("select label not found")
+        return matches[0]["value"]
+
     async def _web_data(self,u,c):
         raw=getattr(getattr(getattr(u,"effective_message",None),"web_app_data",None),"data",None)
         try: rid=json.loads(raw).get("id") if isinstance(raw,str) else None
@@ -1409,7 +1516,8 @@ class SecureHandoffController:
                     for field in s.request["fields"]:
                         if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
                         if s.mode == "form": await self._preflight_form(s)
-                        await self._fill_bound_field(s,field,payload[field["id"]])
+                        value = self._resolve_search_select_value(s, field, payload[field["id"]])
+                        await self._fill_bound_field(s,field,value)
                     if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
                     if s.mode == "form":
                         await self._preflight_form(s)

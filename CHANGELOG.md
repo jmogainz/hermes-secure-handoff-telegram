@@ -8,6 +8,7 @@
 - Blocked embedded/cross-frame field publication pending atomic parent/child authorization; top-document checkout remains supported.
 - Blocked direct model type/click and raw page-text output from the handoff tool.
 - Added original-document/frame binding, cancellation/expiry lifecycle, stricter JSON/choice/URL validation and publication budget regressions.
+- Scoped checkout discovery to the sole visible billing dialog, filtered unsafe multi-token autocomplete metadata, and added private exact-label handling for native selects with 65–512 enabled choices so long country/state lists stay within the public launch budget.
 - Wired `/handoffcancel` to the secure controller as well as diagnostic requests.
 - Added static hosting no-store/no-referrer/CSP/permissions protections.
 - Test browsers are disposable; development never changes the operator's live Chrome profile or uses real credentials.
