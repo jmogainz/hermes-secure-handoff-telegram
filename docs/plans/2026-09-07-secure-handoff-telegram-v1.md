@@ -30,6 +30,7 @@
 - A checkout field submission never clicks `Buy`, `Pay`, `Purchase`, or equivalent. It fills the exact bound fields and publishes a fresh, field-free `payment_confirmation` request.
 - Only an explicit confirmation envelope for the same owner/chat/thread, page/frame/document generation, checkout scope, origin, and bound payment action may trigger the final click.
 - Cross-origin child frames are considered only when their URL is HTTPS, visible/editable, semantically classified as supported secure/payment fields, and structurally contained by the top-level checkout scope. Non-rendered helper frames are ignored as inactive; blank, visible custom, detached, or provider-challenge frames reject the binding, and a helper becoming visible after binding invalidates the lease. No provider host, selector, API key, or site name is hardcoded.
+- Auth stages may bind native identifier/password/OTP controls in one visible, structurally contained HTTPS child frame with private frame/document/origin/host identity. Generic Continue/Next/Submit remains fill-only unless the owner explicitly opts into one exact continuation on the open/attach call; the opt-in is consumed during binding and cannot authorize checkout.
 - Provider chooser, CAPTCHA, passkey, MFA, 3DS, and signup controls are never solved or bypassed. A post-payment `submitted` status means the browser action was accepted, not that the charge or domain purchase succeeded.
 
 ---

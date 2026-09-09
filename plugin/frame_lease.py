@@ -150,6 +150,42 @@ NAVIGATION_WATCH
 }""".replace('NAVIGATION_WATCH', NAVIGATION_WATCH)
 
 
+# Evaluated in a child frame for an explicit auth submit control.  This is
+# intentionally separate from CHILD_GUARD: fields remain fill-only there, and
+# this action lease is created only after the auth binder has classified the
+# stage and exact provider-owned action.
+CHILD_ACTION_GUARD = r"""({action,doc,origin,deadline}) => {
+    const attrs=['id','name','type','autocomplete','inputmode','placeholder',
+      'aria-label','aria-labelledby','aria-describedby','aria-required','role',
+      'formaction','formmethod','formtarget','formenctype'];
+    const clean=t=>String(t||'').replace(/\s+/g,' ').trim();
+    const signature=e=>JSON.stringify([e.tagName,attrs.map(k=>e.getAttribute(k)),
+      clean(e.getAttribute('aria-label')||e.getAttribute('title')||e.innerText||e.value)]);
+    const formSig=f=>f?JSON.stringify([f.action,f.method,f.target,f.enctype,f.getAttribute('id'),f.noValidate]):null;
+    const original=signature(action), originalForm=action?.form||null,
+      originalFormSig=formSig(originalForm), originalRoute=action?.formAction ||
+      (originalForm?originalForm.action:location.href), url=location.href;
+    let dirty=false,internal=null,revoked=false,consumed=false;
+NAVIGATION_WATCH
+    const observer=new MutationObserver(()=>{if(!internal)dirty=true});
+    observer.observe(document.documentElement,{subtree:true,attributes:true,characterData:true,childList:true});
+    const usable=e=>{if(!e||!e.isConnected||e.ownerDocument!==doc||!e.getClientRects().length||e.matches(':disabled')||e.readOnly)return false;
+      for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);if(n.inert||n.hidden||n.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility!=='visible'||s.pointerEvents==='none'||Number(s.opacity)<=0)return false;}return true;};
+    const alive=()=>{if(revoked||consumed||Date.now()>=deadline||document!==doc||location.origin!==origin||location.href!==url||navigation?.currentEntry!==initialEntry)throw Error('stale child action lease')};
+    const check=()=>{alive();if(dirty||!action||!action.isConnected||action.ownerDocument!==doc||signature(action)!==original||action.form!==originalForm||formSig(action.form)!==originalFormSig||
+      (action.formAction || (action.form?action.form.action:location.href))!==originalRoute||!usable(action))throw Error('changed child action');return true;};
+    const release=()=>{revoked=true;observer.disconnect();releaseNavigation()};
+    const lease={revoked:false,consumed:false,deadline,check,release};
+    Object.defineProperty(lease,'revoked',{get:()=>revoked,set:v=>{if(v)release()}});
+    Object.defineProperty(lease,'consumed',{get:()=>consumed});
+    lease.commit=({deadline:d,click})=>{deadline=Math.min(deadline,d||deadline);check();if(!click)throw Error('invalid child action');
+      const r=action.getBoundingClientRect(),hit=doc.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+      if(!hit||!(hit===action||action.contains(hit)))throw Error('covered child action');
+      alive();consumed=true;HTMLElement.prototype.click.call(action);return true;};
+    check();return lease;
+}""".replace('NAVIGATION_WATCH', NAVIGATION_WATCH)
+
+
 @dataclass
 class FrameEntry:
     frame: Any
@@ -191,6 +227,7 @@ class CrossFrameLease:
         allow_click: bool = False,
         click_window_ms: int = 1500,
         summary: Any = None,
+        child_action_guard: Any = None,
     ) -> None:
         self.parent_guard = parent_guard
         self.parent_fields = parent_fields
@@ -202,6 +239,7 @@ class CrossFrameLease:
         self.allow_click = allow_click
         self.click_window_ms = click_window_ms
         self.summary = summary
+        self.child_action_guard = child_action_guard
         self.revoked = False
         self.consumed = False
         self._disposed = False
@@ -229,6 +267,9 @@ class CrossFrameLease:
                 await self._validate_topology()
             await self.parent_guard.evaluate("g => g.check()")
             await asyncio.gather(*(self._check_frame(entry) for entry in self.frames))
+            if self.child_action_guard is not None:
+                if await self.child_action_guard.evaluate("g => g.check()") is not True:
+                    raise FrameLeaseError("frame_stale")
         except FrameLeaseError:
             raise
         except Exception:
@@ -281,6 +322,18 @@ class CrossFrameLease:
         # atomic across OOPIFs; see the protocol documentation.
         await self.check_all(click=True)
         self._click_attempted = True
+        if self.child_action_guard is not None:
+            try:
+                result = await self.child_action_guard.evaluate("(g,a) => g.commit(a)", {
+                    "deadline": self.deadline,
+                    "click": True,
+                })
+            except Exception:
+                raise
+            if result is not True:
+                raise FrameLeaseError("frame_stale")
+            self.consumed = True
+            return True
         try:
             parent_click_index = max(self.parent_fields.values(), default=-1) + 1
             result = await self.parent_guard.evaluate("(g,a) => g.commit(a)", {
@@ -372,6 +425,8 @@ class CrossFrameLease:
         await self._release_handle(self.parent_guard)
         for entry in self.frames:
             await self._release_handle(entry.guard)
+        if self.child_action_guard is not None:
+            await self._release_handle(self.child_action_guard)
 
 
-__all__ = ["CHILD_GUARD", "CrossFrameLease", "FrameEntry", "FrameLeaseError", "PARENT_GUARD"]
+__all__ = ["CHILD_ACTION_GUARD", "CHILD_GUARD", "CrossFrameLease", "FrameEntry", "FrameLeaseError", "PARENT_GUARD"]

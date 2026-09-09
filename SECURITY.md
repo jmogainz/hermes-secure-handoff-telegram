@@ -90,6 +90,14 @@ not trust embedded processors must add an owner-visible child-origin policy or
 disable cross-frame purchase authority. HTTPS and DOM containment alone are not a
 universal provider-authority proof.
 
+The same private frame identity checks may be used for one visible HTTPS child
+frame containing native authentication controls. Auth action clicks are scoped to
+the owning child frame; generic Continue/Next/Submit actions remain fill-only
+unless the owner explicitly opts into one exact continuation on the attached
+target. That opt-in is consumed during binding and never grants purchase
+authority. Custom widgets, CAPTCHA, passkeys, MFA and provider challenges remain
+human-owned.
+
 ## Reporting
 
 Do not open a public issue for a suspected credential leak, authentication

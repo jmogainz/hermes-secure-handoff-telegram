@@ -431,6 +431,37 @@ async def test_cross_frame_helper_becoming_visible_invalidates_lease(cross_frame
 
 
 @pytest.mark.asyncio
+async def test_cross_frame_allows_structural_controls_with_native_fields(cross_frame_controller):
+    controller, page, payment = cross_frame_controller
+    await page.set_content(
+        f'<main><form action="/purchase">'
+        '<div role="combobox"><input required autocomplete="billing address-line1"></div>'
+        '<div role="button" tabindex="0">Choose country</div>'
+        f'<iframe title="payment fields" src="{payment.origin}/checkout-frame"></iframe>'
+        '<button type="button">Pay</button></form></main>'
+    )
+    frame = page.frames[-1]
+    await frame.wait_for_load_state("domcontentloaded")
+    await frame.set_content(
+        '<div role="tablist">'
+        '<button role="tab" aria-selected="true">Card payment</button>'
+        '<button role="tab">Wallet payment</button>'
+        '</div>'
+        '<label>Card number<input autocomplete="cc-number" type="text"></label>'
+        '<label>Expiration date<input autocomplete="cc-exp" type="text"></label>'
+        '<label>Security code<input autocomplete="cc-csc" type="text"></label>'
+    )
+    attached = json.loads(await asyncio.to_thread(controller.tool, {
+        "action": "attach", "origin": page.url.split("/login")[0], "mode": "compose"
+    }))
+    assert attached["status"] == "attached"
+    found = json.loads(await asyncio.to_thread(controller.tool, {
+        "action": "discover_components", "session_ref": attached["session_ref"]
+    }))
+    assert found["status"] == "composition_available", found
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("shape", ["custom", "blank", "canvas", "generic", "top-custom", "http"])
 async def test_cross_frame_discovery_rejects_unsupported_embedded_controls(cross_frame_controller, shape):
     controller, page, payment = cross_frame_controller

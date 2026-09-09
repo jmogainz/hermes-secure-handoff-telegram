@@ -12,13 +12,13 @@ try:
     from .handoff_adapters import PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
     from .config import DEFAULT_CDP_URL, validate_browser_cdp_url
     from .connection_check import load_runtime_config
-    from .frame_lease import CHILD_GUARD, PARENT_GUARD, CrossFrameLease, FrameEntry, FrameLeaseError
+    from .frame_lease import CHILD_ACTION_GUARD, CHILD_GUARD, PARENT_GUARD, CrossFrameLease, FrameEntry, FrameLeaseError
 except ImportError:  # Standalone Hermes plugin loader path.
     import composition
     from handoff_adapters import PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
     from config import DEFAULT_CDP_URL, validate_browser_cdp_url
     from connection_check import load_runtime_config
-    from frame_lease import CHILD_GUARD, PARENT_GUARD, CrossFrameLease, FrameEntry, FrameLeaseError
+    from frame_lease import CHILD_ACTION_GUARD, CHILD_GUARD, PARENT_GUARD, CrossFrameLease, FrameEntry, FrameLeaseError
 TTL = 600
 IDLE_TTL = 1800
 MAX_SESSIONS = 4
@@ -40,6 +40,7 @@ SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REF_RE = re.compile(r"^r[0-9a-zA-Z_-]{1,32}$")
 _TARGET_ID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 _SAFE_OPTION_RE = re.compile(r"^[^\x00-\x1f\x7f]{0,128}$")
+_CUSTOM_ENTRY_ROLES = frozenset({"textbox", "searchbox", "combobox", "checkbox", "radio", "slider"})
 
 class _FrameBindingError(ValueError):
     """Internal frame rejection with a fixed public-safe reason."""
@@ -322,6 +323,16 @@ def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
 class Session:
     user: int; chat: int; thread: int|None; page: Any = field(default=None, repr=False); context: Any = field(default=None, repr=False); request: dict|None = None; key: Any = field(default=None, repr=False); site: Any = field(default=None, repr=False); refs: dict[str, Any] = field(default_factory=dict, repr=False); ref_meta: dict[str, dict] = field(default_factory=dict, repr=False); field_parts: dict[str, list[Any]] = field(default_factory=dict, repr=False); field_frames: dict[str, Any] = field(default_factory=dict, repr=False); field_origins: dict[str, str] = field(default_factory=dict, repr=False); field_documents: dict[str, Any] = field(default_factory=dict, repr=False)
     field_hosts: dict[str, Any] = field(default_factory=dict, repr=False)
+    auth_field_forms: dict[str, Any] = field(default_factory=dict, repr=False)
+    auth_form_actions: dict[str, str] = field(default_factory=dict, repr=False)
+    submit_frame: Any = field(default=None, repr=False)
+    submit_document: Any = field(default=None, repr=False)
+    submit_origin: str = field(default="", repr=False)
+    submit_host: Any = field(default=None, repr=False)
+    submit_form: Any = field(default=None, repr=False)
+    auth_submit_action: str = field(default="", repr=False)
+    auth_manual_action: bool = False
+    auth_action_approved: bool = False
     field_frame_ordinals: dict[str, int] = field(default_factory=dict, repr=False)
     field_source_labels: dict[str, str] = field(default_factory=dict, repr=False)
     cross_frame: bool = False
@@ -388,7 +399,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             except OSError: pass
             with path.open("a",encoding="utf-8") as handle:
                 row={"v":3,"id":s.request["id"],"status":s.status,"thread":s.thread,"time":int(time.time()*1000)}
-                if reason in {"expiry","refresh_stage","preflight_before_decrypt","decrypt","preflight_after_decrypt","fill","refresh_before_click","preflight_after_fill","click","auto_submit","rebind"}: row["reason"]=reason
+                if reason in {"expiry","refresh_stage","preflight_before_decrypt","decrypt","preflight_after_decrypt","fill","refresh_before_click","refresh_before_confirmation","preflight_after_fill","click","auto_submit","rebind","refresh_before_manual_action","manual_action"}: row["reason"]=reason
                 handle.write(json.dumps(row,separators=(",",":"))+"\n")
         except Exception: pass
     def _submit(self,coro):
@@ -538,70 +549,220 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         origin=_origin(page.url); adapter=adapter_for_origin(origin)
         s=Session(*ident,page=page,context=context,wake=asyncio.Event(),provider=adapter.name); self.sessions[ident]=s; return s
     async def _bind_auth_stage(self, s):
-        page=s.page; adapter=adapter_for_url(page.url); s.provider=adapter.name; candidates=[]
-        for e in await page.locator("input").all():
+        page = s.page
+        adapter = adapter_for_url(page.url)
+        s.provider = adapter.name
+        self._reset_binding(s)
+        top_document = await page.evaluate_handle("() => document")
+        top_scope = await page.evaluate_handle("() => document.body || document.documentElement")
+        groups = []
+        frame_list = list(page.frames)
+        for frame_ordinal, frame in enumerate(frame_list):
+            is_main = frame == page.main_frame
+            frame_origin = _origin(page.url) if is_main else None
+            frame_document = top_document if is_main else None
+            frame_host = None
             try:
-                typ=(await e.get_attribute("type") or "text").lower(); name=(await e.get_attribute("name") or "").lower(); autocomplete=(await e.get_attribute("autocomplete") or "").lower(); aria=(await e.get_attribute("aria-label") or "").lower(); inputmode=(await e.get_attribute("inputmode") or "").lower(); maxlength=(await e.get_attribute("maxlength") or "").lower()
-                if typ in {"hidden","submit","button","image","file","checkbox","radio"} or not await self._usable_input(e): continue
-                metadata={"type":typ,"name":name,"autocomplete":autocomplete,"aria":aria,"inputmode":inputmode,"maxlength":maxlength}
-                kind=adapter.classify_input(metadata)
-                if kind is None: continue
-                handle=await e.element_handle()
-                if handle: candidates.append((kind,handle,metadata))
-            except Exception: pass
-        if not candidates: raise ValueError
-        grouped=[]
-        for kind, element, metadata in candidates:
-            form_handle=await page.evaluate_handle("el => el.form",element)
-            form=form_handle if await page.evaluate("form => !!form",form_handle) is True else None
-            scope=form or await page.evaluate_handle("el => el.closest('dialog, [role=dialog], main') || document.body",element)
-            group=None
-            for existing in grouped:
-                if await page.evaluate("a => a[0] === a[1]",[scope, existing[1]]) is True:
-                    group=existing
-                    break
-            if group is None:
-                grouped.append((form,scope,[]))
-                group=grouped[-1]
-            group[2].append((kind,element,metadata))
-        eligible=[g for g in grouped if any(k in {"text","email","tel","number","password","otp"} for k,_,_ in g[2])]
-        secret=[g for g in eligible if any(k in {"password","otp"} for k,_,_ in g[2])]
-        if len(secret)==1: eligible=secret
-        if len(eligible)!=1: raise ValueError
-        form,scope,candidates=eligible[0]
-        split_otp=len(candidates)>1 and all(k=="otp" for k,_,_ in candidates)
-        if form is None and not adapter.allow_formless: raise ValueError
-        if (split_otp and not 2 <= len(candidates) <= 8) or (not split_otp and len(candidates)>4): raise ValueError
-        if not split_otp and len({k for k,_,_ in candidates}) != len(candidates): raise ValueError
-        submit=await self._find_submit(page,form,scope,adapter,allow_missing=split_otp)
+                if not is_main:
+                    frame_host = await frame.frame_element()
+                    if frame_host is None:
+                        continue
+                    if not await self._frame_host_in_scope(page, frame, top_scope, frame_host):
+                        continue
+                    try:
+                        frame_origin = _origin(frame.url)
+                    except Exception:
+                        frame_origin = None
+                    frame_document = await frame.evaluate_handle("() => document")
+                for element in await frame.locator("input").all():
+                    try:
+                        typ = (await element.get_attribute("type") or "text").lower()
+                        name = (await element.get_attribute("name") or "").lower()
+                        autocomplete = (await element.get_attribute("autocomplete") or "").lower()
+                        aria = (await element.get_attribute("aria-label") or "").lower()
+                        inputmode = (await element.get_attribute("inputmode") or "").lower()
+                        maxlength = (await element.get_attribute("maxlength") or "").lower()
+                        if typ in {"hidden", "submit", "button", "image", "file", "checkbox", "radio"}:
+                            continue
+                        if not await self._usable_input(element):
+                            continue
+                        metadata = {
+                            "type": typ,
+                            "name": name,
+                            "autocomplete": autocomplete,
+                            "aria": aria,
+                            "inputmode": inputmode,
+                            "maxlength": maxlength,
+                        }
+                        kind = adapter.classify_input(metadata)
+                        if kind is None:
+                            continue
+                        handle = await element.element_handle()
+                        if handle is None:
+                            continue
+                        local_form = await frame.evaluate_handle("el => el.form", handle)
+                        if await frame.evaluate("form => !!form", local_form) is not True:
+                            local_form = None
+                        local_scope = local_form or await frame.evaluate_handle(
+                            "el => el.closest('dialog, [role=dialog], main') || document.body", handle
+                        )
+                        group = None
+                        for existing in groups:
+                            if existing["frame"] is not frame:
+                                continue
+                            if await frame.evaluate(
+                                "a => a[0] === a[1]", [local_scope, existing["scope"]]
+                            ) is True:
+                                group = existing
+                                break
+                        if group is None:
+                            group = {
+                                "frame": frame,
+                                "ordinal": frame_ordinal,
+                                "origin": frame_origin,
+                                "document": frame_document,
+                                "host": frame_host,
+                                "form": local_form,
+                                "scope": local_scope,
+                                "candidates": [],
+                            }
+                            groups.append(group)
+                        group["candidates"].append((kind, handle, metadata))
+                    except Exception:
+                        continue
+            except _FrameBindingError:
+                raise
+            except Exception:
+                continue
+            if frame_origin is None and any(group["frame"] is frame for group in groups):
+                raise _FrameBindingError("frame_unsupported")
+        eligible = [
+            group for group in groups
+            if any(kind in {"text", "email", "tel", "number", "password", "otp"}
+                   for kind, _, _ in group["candidates"])
+        ]
+        secret = [
+            group for group in eligible
+            if any(kind in {"password", "otp"} for kind, _, _ in group["candidates"])
+        ]
+        if len(secret) == 1:
+            eligible = secret
+        if len(eligible) != 1:
+            raise ValueError
+        group = eligible[0]
+        frame = group["frame"]
+        form = group["form"]
+        scope = group["scope"]
+        candidates = group["candidates"]
+        split_otp = len(candidates) > 1 and all(kind == "otp" for kind, _, _ in candidates)
+        if form is None and not adapter.allow_formless:
+            raise ValueError
+        if (split_otp and not 2 <= len(candidates) <= 8) or (not split_otp and len(candidates) > 4):
+            raise ValueError
+        if not split_otp and len({kind for kind, _, _ in candidates}) != len(candidates):
+            raise ValueError
+        submit = await self._find_submit(frame, form, scope, adapter, allow_missing=split_otp)
+        auth_manual_action = False
+        ambiguous_auth_action = False
+        allow_ambiguous_action = s.auth_action_approved
+        s.auth_action_approved = False
         if submit is not None:
-            action_text = await submit.evaluate("e => (e.innerText || e.getAttribute('value') || e.getAttribute('aria-label') || '').trim().toLowerCase()")
+            action_text = await submit.evaluate(
+                "e => (e.innerText || e.getAttribute('value') || e.getAttribute('aria-label') || '').trim().toLowerCase()"
+            )
             if action_text not in {"continue", "next", "sign in", "log in", "login", "verify", "verify code", "submit"}:
                 raise ValueError("not an auth action")
-            # Autofill hints identify data, not the operation. Account deletion
-            # and profile edits also use current-password/username. Ambiguous
-            # actions always remain fill-only, even with those hints.
-            explicit = any(m["autocomplete"] in {"username", "current-password", "one-time-code"} for _, _, m in candidates)
             if action_text in {"continue", "next", "submit"}:
-                raise ValueError("ambiguous action is fill-only")
-            if any(m["autocomplete"] == "new-password" for _, _, m in candidates):
+                ambiguous_auth_action = True
+                explicit = any(
+                    metadata["autocomplete"] in {"username", "current-password", "one-time-code"}
+                    for _, _, metadata in candidates
+                )
+                if not (allow_ambiguous_action or explicit):
+                    raise ValueError("ambiguous auth action")
+                if not allow_ambiguous_action:
+                    auth_manual_action = True
+                    submit = None
+            else:
+                explicit = any(
+                    metadata["autocomplete"] in {"username", "current-password", "one-time-code"}
+                    for _, _, metadata in candidates
+                )
+                if not explicit and not any(kind in {"password", "otp"} for kind, _, _ in candidates):
+                    raise ValueError("not an auth stage")
+            if any(metadata["autocomplete"] == "new-password" for _, _, metadata in candidates):
                 raise ValueError("registration is fill-only")
-            if not explicit and not any(k in {"password", "otp"} for k, _, _ in candidates):
-                raise ValueError("not an auth stage")
-        action=await page.evaluate("form => form.action",form) if form else page.url
-        submit_action=action
-        override=await page.evaluate("button => button.formAction || ''",submit) if submit else ""
-        if override: submit_action=override
-        if _origin(action)!=_origin(page.url) or _origin(submit_action)!=_origin(page.url): raise ValueError
-        s.document=await page.evaluate_handle("() => document"); s.form=form; s.scope=scope; s.form_action=action; s.submit_action=submit_action
-        s.auth_container=await page.evaluate_handle("e => e.closest('dialog, [role=dialog], main') || document.body", candidates[0][1])
-        logical=[("otp",candidates[0][1],[element for _,element,_ in candidates])] if split_otp else [(kind,element,[element]) for kind,element,_ in candidates]
-        s.stage=adapter.stage_for(tuple(kind for kind,_,_ in logical)).id
-        s.mode="auth"; s.refs={}; s.ref_meta={}; s.field_parts={}; s.field_frames={}; s.field_origins={}; s.field_documents={}; s.auto_submit=split_otp and submit is None
-        labels={"text":"Username or email","email":"Email","tel":"Phone","number":"Number","password":"Password","otp":"One-time code"}
-        for i,(kind,element,parts) in enumerate(logical):
-            field_id=f"f{i}"; s.refs[field_id]=element; s.field_parts[field_id]=parts; s.field_frames[field_id]=page.main_frame; s.field_origins[field_id]=_origin(page.url); s.field_documents[field_id]=s.document; s.ref_meta[field_id]={"label":labels[kind],"type":kind,"required":True}
-        if submit is not None: s.refs["submit"]=submit
+        local_action = await frame.evaluate("form => form.action", form) if form else frame.url
+        if _origin(local_action) != group["origin"]:
+            raise ValueError("auth action origin mismatch")
+        if ambiguous_auth_action and not allow_ambiguous_action:
+            route = urlsplit(local_action).path.lower()
+            if not any(token in route for token in ("/login", "/signin", "/sign-in", "/auth", "/verify")):
+                raise ValueError("ambiguous action outside auth route")
+        local_submit_action = local_action
+        if submit is not None:
+            override = await frame.evaluate("button => button.formAction || ''", submit) or ""
+            if override:
+                local_submit_action = override
+            if _origin(local_submit_action) != group["origin"]:
+                raise ValueError("auth submit origin mismatch")
+        cross_frame = frame != page.main_frame
+        s.document = top_document
+        s.scope = top_scope if cross_frame else scope
+        s.form = None if cross_frame else form
+        s.form_action = page.url if cross_frame else local_action
+        s.submit_action = page.url if cross_frame else local_submit_action
+        s.auth_submit_action = local_submit_action
+        s.auth_manual_action = auth_manual_action
+        s.auth_container = top_scope if cross_frame else await frame.evaluate_handle(
+            "e => e.closest('dialog, [role=dialog], main') || document.body", candidates[0][1]
+        )
+        logical = (
+            [("otp", candidates[0][1], [element for _, element, _ in candidates])]
+            if split_otp
+            else [(kind, element, [element]) for kind, element, _ in candidates]
+        )
+        s.stage = adapter.stage_for(tuple(kind for kind, _, _ in logical)).id
+        s.mode = "auth"
+        s.refs = {}
+        s.ref_meta = {}
+        s.field_parts = {}
+        s.field_frames = {}
+        s.field_origins = {}
+        s.field_documents = {}
+        s.field_hosts = {}
+        s.field_frame_ordinals = {}
+        s.auth_field_forms = {}
+        s.auth_form_actions = {}
+        s.cross_frame = cross_frame
+        s.auto_submit = split_otp and submit is None
+        labels = {
+            "text": "Username or email",
+            "email": "Email",
+            "tel": "Phone",
+            "number": "Number",
+            "password": "Password",
+            "otp": "One-time code",
+        }
+        for index, (kind, element, parts) in enumerate(logical):
+            field_id = f"f{index}"
+            s.refs[field_id] = element
+            s.field_parts[field_id] = parts
+            s.field_frames[field_id] = frame
+            s.field_origins[field_id] = group["origin"]
+            s.field_documents[field_id] = group["document"]
+            s.field_hosts[field_id] = group["host"]
+            s.field_frame_ordinals[field_id] = group["ordinal"]
+            s.auth_field_forms[field_id] = form
+            s.auth_form_actions[field_id] = local_action
+            s.ref_meta[field_id] = {"label": labels[kind], "type": kind, "required": True}
+        if submit is not None:
+            s.refs["submit"] = submit
+            s.submit_frame = frame
+            s.submit_document = group["document"]
+            s.submit_origin = group["origin"]
+            s.submit_host = group["host"]
+            s.submit_form = form
     async def _release_guard(self, guard):
         try: await guard.evaluate("g => {g.revoked=true;}")
         except Exception: pass
@@ -638,6 +799,8 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         s.field_origins = {}
         s.field_documents = {}
         s.field_hosts = {}
+        s.auth_field_forms = {}
+        s.auth_form_actions = {}
         s.field_frame_ordinals = {}
         s.field_source_labels = {}
         s.cross_frame = False
@@ -645,6 +808,13 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         s.scope = None
         s.form_action = ""
         s.submit_action = ""
+        s.submit_frame = None
+        s.submit_document = None
+        s.submit_origin = ""
+        s.submit_host = None
+        s.submit_form = None
+        s.auth_submit_action = ""
+        s.auth_manual_action = False
         s.checkout_action = None
         s.auto_submit = False
 
@@ -860,6 +1030,46 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 continue
         return controls
 
+    async def _unsupported_visible_custom_control(self, element):
+        """Reject editable/payment custom widgets, not structural UI chrome."""
+        tag = (await element.evaluate("e => e.tagName") or "").lower()
+        role = (await element.get_attribute("role") or "").lower()
+        has_visible_native_descendant = await element.evaluate(
+            """e => [...e.querySelectorAll('input,textarea,select')].some(n => {
+                if (n.disabled || n.readOnly) return false;
+                const s = getComputedStyle(n), r = n.getClientRects()[0];
+                return !!r && s.display !== 'none' && s.visibility === 'visible' &&
+                    Number(s.opacity) > 0 && s.pointerEvents !== 'none';
+            })"""
+        )
+        has_editable_custom = await element.evaluate(
+            "e => e.isContentEditable || !!e.querySelector('[contenteditable=\"true\"]')"
+        )
+        if has_editable_custom:
+            return True
+        if role in _CUSTOM_ENTRY_ROLES and not has_visible_native_descendant:
+            return True
+        # Tabs are non-editable method/navigation controls. If the frame has
+        # native fields, they are structural around the supported entry nodes.
+        if role == "tab":
+            return False
+        interactive = (
+            tag == "button"
+            or role == "button"
+            or await element.get_attribute("onclick") is not None
+            or await element.get_attribute("tabindex") is not None
+        )
+        if not interactive or has_visible_native_descendant:
+            return False
+        return await element.evaluate(
+            """e => {
+                const text = ((e.getAttribute('aria-label') || '') + ' ' +
+                    (e.getAttribute('title') || '') + ' ' + (e.innerText || ''))
+                    .replace(/\\s+/g, ' ').slice(0, 256);
+                return /\\b(?:card|payment|pay|cvc|cvv|security|expiry|expiration|billing|number)\\b/i.test(text);
+            }"""
+        ) is True
+
     async def _validate_scope_iframes(self, scope):
         """Validate active iframe hosts; non-rendered helper frames are inert."""
         scope_element = scope.as_element() if hasattr(scope, "as_element") else scope
@@ -920,14 +1130,6 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 if not visible_controls:
                     raise _FrameBindingError("frame_unsupported")
                 frame_doc = await frame.evaluate_handle("() => document")
-                custom_controls = [
-                    await control.evaluate(
-                        "e => !['INPUT','TEXTAREA','SELECT'].includes(e.tagName)"
-                    )
-                    for control in visible_controls
-                ]
-                if any(custom_controls):
-                    raise _FrameBindingError("frame_unsupported")
             for element in visible_controls:
                 try:
                     handle = await element.element_handle()
@@ -935,12 +1137,15 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         "a => a[0] === a[1]", [handle, action]
                     ) is True:
                         continue
-                    if frame == page.main_frame and not await element.evaluate(
+                    is_native = await element.evaluate(
                         "e => ['INPUT','TEXTAREA','SELECT'].includes(e.tagName)"
-                    ):
-                        if handle and await page.evaluate(
+                    )
+                    if not is_native:
+                        if frame == page.main_frame and handle and not await page.evaluate(
                             "a => a[1].contains(a[0])", [handle, scope]
-                        ) is True:
+                        ):
+                            continue
+                        if await self._unsupported_visible_custom_control(element):
                             raise _FrameBindingError("frame_unsupported")
                         continue
                     if not await self._usable_input(element):
@@ -1220,28 +1425,48 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                     grouped.setdefault(frame, []).append((global_index, handle))
                 global_index += 1
             s.commit_slots[field_id] = slots
+        auth_submit = s.refs.get("submit") if allow_click and s.mode == "auth" else None
+        child_action_frame = s.submit_frame if auth_submit is not None else None
+        if auth_submit is not None and child_action_frame is None:
+            raise _FrameBindingError("frame_stale")
+        if child_action_frame is not None and child_action_frame != s.page.main_frame:
+            grouped.setdefault(child_action_frame, [])
         if parent_guard is None:
             action = getattr(s, "checkout_action", None) or s.refs.get("submit")
+            parent_action = None if child_action_frame is not None and child_action_frame != s.page.main_frame else action
             parent_guard = await s.page.evaluate_handle(PARENT_GUARD, {
                 "nodes": parent_nodes,
                 "form": s.form,
                 "scope": s.scope,
                 "doc": s.document,
-                "action": action,
+                "action": parent_action,
                 "deadline": deadline,
                 "submitAction": s.submit_action,
-                "allowClick": allow_click,
+                "allowClick": allow_click and parent_action is not None,
             })
         entries = []
         guards = []
+        child_action_guard = None
         try:
             for frame, frame_fields in grouped.items():
                 if frame.is_detached() or frame not in s.page.frames:
                     raise _FrameBindingError("frame_stale")
-                first_field = next(field_id for field_id in fields if s.field_frames.get(field_id) is frame)
-                document = s.field_documents[first_field]
-                origin = s.field_origins[first_field]
-                host = s.field_hosts[first_field]
+                field_ids = [field_id for field_id in fields if s.field_frames.get(field_id) is frame]
+                if field_ids:
+                    first_field = field_ids[0]
+                    document = s.field_documents[first_field]
+                    origin = s.field_origins[first_field]
+                    host = s.field_hosts[first_field]
+                    ordinal = s.field_frame_ordinals[first_field]
+                elif frame is child_action_frame:
+                    document = s.submit_document
+                    origin = s.submit_origin
+                    host = s.submit_host
+                    ordinal = next((index for index, candidate in enumerate(s.page.frames) if candidate is frame), -1)
+                    if document is None or not origin or host is None or ordinal < 0:
+                        raise _FrameBindingError("frame_stale")
+                else:
+                    raise _FrameBindingError("frame_stale")
                 local_nodes = [handle for _, handle in frame_fields]
                 guard = await frame.evaluate_handle(CHILD_GUARD, {
                     "nodes": local_nodes,
@@ -1250,7 +1475,14 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                     "deadline": deadline,
                 })
                 guards.append(guard)
-                entry = FrameEntry(frame, document, origin, host, s.field_frame_ordinals[first_field], guard, frame_fields)
+                if frame is child_action_frame:
+                    child_action_guard = await frame.evaluate_handle(CHILD_ACTION_GUARD, {
+                        "action": auth_submit,
+                        "doc": document,
+                        "origin": origin,
+                        "deadline": deadline,
+                    })
+                entry = FrameEntry(frame, document, origin, host, ordinal, guard, frame_fields)
                 entries.append(entry)
                 for local_index, (index, _handle) in enumerate(frame_fields):
                     index_map[index] = (guard, local_index)
@@ -1281,6 +1513,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 deadline=deadline,
                 allow_click=allow_click,
                 summary=summary,
+                child_action_guard=child_action_guard,
             )
             await lease.check_all()
             return lease
@@ -1293,6 +1526,16 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 finally:
                     try:
                         await guard.dispose()
+                    except Exception:
+                        pass
+            if child_action_guard is not None:
+                try:
+                    await child_action_guard.evaluate("g => {g.revoked=true;}")
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        await child_action_guard.dispose()
                     except Exception:
                         pass
             if parent_guard is not None and parent_guard is not getattr(s, "commit_guard", None):
@@ -1494,10 +1737,27 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
     async def _auth_stage_detected(self,s):
         try:
             adapter=adapter_for_url(str(getattr(s.page,"url","") or ""))
-            for e in await s.page.locator("input").all():
-                if not await self._usable_input(e): continue
-                typ=(await e.get_attribute("type") or "text").lower(); name=(await e.get_attribute("name") or "").lower(); autocomplete=(await e.get_attribute("autocomplete") or "").lower(); aria=(await e.get_attribute("aria-label") or "").lower()
-                if adapter.classify_input({"type":typ,"name":name,"autocomplete":autocomplete,"aria":aria}) is not None: return True
+            top_scope = s.scope or await s.page.evaluate_handle("() => document.body || document.documentElement")
+            for frame in s.page.frames:
+                if frame != s.page.main_frame:
+                    try:
+                        host = await frame.frame_element()
+                        if host is None or not await self._frame_host_in_scope(s.page, frame, top_scope, host):
+                            continue
+                        _origin(frame.url)
+                    except Exception:
+                        continue
+                for e in await frame.locator("input").all():
+                    if not await self._usable_input(e):
+                        continue
+                    typ=(await e.get_attribute("type") or "text").lower()
+                    name=(await e.get_attribute("name") or "").lower()
+                    autocomplete=(await e.get_attribute("autocomplete") or "").lower()
+                    aria=(await e.get_attribute("aria-label") or "").lower()
+                    inputmode=(await e.get_attribute("inputmode") or "").lower()
+                    maxlength=(await e.get_attribute("maxlength") or "").lower()
+                    if adapter.classify_input({"type":typ,"name":name,"autocomplete":autocomplete,"aria":aria,"inputmode":inputmode,"maxlength":maxlength}) is not None:
+                        return True
             return False
         except Exception: return True
     async def _safe_refs(self,s):
@@ -1652,6 +1912,13 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
 
     async def _run(self,action,args,ident):
         if args.get("mode") not in {None, "form", "compose"}: return {"status":"invalid"}
+        allow_ambiguous_auth_action = args.get("allow_ambiguous_auth_action")
+        if allow_ambiguous_auth_action is not None and type(allow_ambiguous_auth_action) is not bool:
+            return {"status":"invalid"}
+        if allow_ambiguous_auth_action and action not in {"open", "attach"}:
+            return {"status":"invalid"}
+        if allow_ambiguous_auth_action and args.get("mode") == "compose":
+            return {"status":"invalid"}
         if args.get('mode') == 'compose' and action != 'attach': return {"status":"invalid"}
         self._expire()
         if action in purchase_sources.ACTIONS:
@@ -1670,6 +1937,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             try:
                 s=await self._new_session(ident,args["url"],lease=lease)
                 s.requested_mode = args.get("mode")
+                s.auth_action_approved = allow_ambiguous_auth_action is True
                 return await self._snapshot(s)
             except Exception: return {"status":"unavailable"}
         if action=="attach":
@@ -1681,6 +1949,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             try:
                 s=await self._attach_session(ident,origin,target_id,lease=lease)
                 s.requested_mode = args.get("mode")
+                s.auth_action_approved = allow_ambiguous_auth_action is True
                 async with s.lock:
                     if s.requested_mode == "compose":
                         s.session_ref = composition.mint("ss_")
@@ -1735,9 +2004,10 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             if not observed_purchase.valid_payload(payload["action"],payload): return '{"status":"invalid"}'
         elif payload.get("action") in composition.ACTIONS:
             if not composition.valid_payload(payload["action"],payload): return '{"status":"invalid"}'
-        elif (set(payload) - {"action","url","origin","mode","ref","text","timeout"}
+        elif (set(payload) - {"action","url","origin","mode","ref","text","timeout","allow_ambiguous_auth_action"}
             or any(not isinstance(payload[k], str) for k in ("action","url","origin","mode","ref","text") if k in payload)
-            or ("timeout" in payload and (type(payload["timeout"]) is not int or not 0 <= payload["timeout"] <= 90))):
+            or ("timeout" in payload and (type(payload["timeout"]) is not int or not 0 <= payload["timeout"] <= 90))
+            or ("allow_ambiguous_auth_action" in payload and type(payload["allow_ambiguous_auth_action"]) is not bool)):
             return '{"status":"invalid"}'
         if (ident is None or len(ident) != 3 or type(ident[0]) is not int or type(ident[1]) is not int
             or ident[0] <= 0 or ident[1] != ident[0] or (ident[2] is not None and (type(ident[2]) is not int or ident[2] <= 0))
@@ -1869,8 +2139,112 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             if isinstance(error, asyncio.CancelledError): raise
             return {"status":s.status}
 
+    async def _preflight_auth_cross_frame(self, s):
+        if not s.request or s.request["expiresAt"] < int(time.time() * 1000):
+            raise _FrameBindingError("frame_stale")
+        if _origin(s.page.url) != s.request["origin"]:
+            raise _FrameBindingError("frame_stale")
+        if await s.page.evaluate("d => d === document", s.document) is not True:
+            raise _FrameBindingError("frame_stale")
+        if not s.scope or await s.page.evaluate(
+            "e => e.ownerDocument === document && e.isConnected", s.scope
+        ) is not True:
+            raise _FrameBindingError("frame_stale")
+        if _origin(s.form_action) != s.request["origin"]:
+            raise _FrameBindingError("frame_stale")
+        expected_types = {
+            "text": {"text", "email"},
+            "email": {"email", "text"},
+            "tel": {"tel", "text", "number"},
+            "number": {"number", "text"},
+            "password": {"password"},
+            "otp": {"one-time-code", "text", "tel"},
+        }
+        checked_frames = set()
+        for field in s.request["fields"]:
+            field_id = field["id"]
+            frame = s.field_frames.get(field_id)
+            document = s.field_documents.get(field_id)
+            origin = s.field_origins.get(field_id)
+            host = s.field_hosts.get(field_id)
+            ordinal = s.field_frame_ordinals.get(field_id)
+            parts = s.field_parts.get(field_id) or ([s.refs.get(field_id)] if s.refs.get(field_id) else [])
+            if frame is None or document is None or not origin or not isinstance(ordinal, int) or not parts:
+                raise _FrameBindingError("frame_stale")
+            marker = id(frame)
+            if frame != s.page.main_frame and marker not in checked_frames:
+                await self._validate_frame_lease_entry(s, SimpleNamespace(
+                    frame=frame, document=document, origin=origin, host=host, ordinal=ordinal,
+                ))
+                checked_frames.add(marker)
+            local_form = s.auth_field_forms.get(field_id)
+            expected_action = s.auth_form_actions.get(field_id)
+            if local_form is not None:
+                live_action = await frame.evaluate("f => f.action", local_form)
+                if live_action != expected_action or _origin(live_action) != origin:
+                    raise _FrameBindingError("frame_stale")
+            for element in parts:
+                if not await self._usable_input(element):
+                    raise _FrameBindingError("frame_stale")
+                tag = (await element.evaluate("e => e.tagName")).lower()
+                typ = "select" if tag == "select" else (await element.get_attribute("type") or "text").lower()
+                if typ not in expected_types.get(field["type"], set()):
+                    raise _FrameBindingError("frame_stale")
+                if frame == s.page.main_frame:
+                    connected = await s.page.evaluate(
+                        "a => a[0].ownerDocument === document && a[0].isConnected && a[1].contains(a[0])",
+                        [element, s.scope],
+                    )
+                else:
+                    connected = await frame.evaluate(
+                        "a => a[0].ownerDocument === a[1] && a[0].isConnected",
+                        [element, document],
+                    )
+                    if local_form is not None:
+                        connected = connected and await frame.evaluate(
+                            "a => a[0].form === a[1]", [element, local_form]
+                        )
+                if connected is not True:
+                    raise _FrameBindingError("frame_stale")
+        submit = s.refs.get("submit")
+        if submit is None and (s.auto_submit or s.auth_manual_action):
+            return
+        if submit is None or not await submit.is_visible() or not await submit.is_enabled():
+            raise _FrameBindingError("frame_stale")
+        submit_frame = s.submit_frame or s.page.main_frame
+        if submit_frame == s.page.main_frame:
+            if not await self._related_submit(s.page, s.form, s.scope, submit):
+                raise _FrameBindingError("frame_stale")
+            if await s.page.evaluate(
+                "a => !a[0].formAction || a[0].formAction === a[1]", [submit, s.submit_action]
+            ) is not True:
+                raise _FrameBindingError("frame_stale")
+        else:
+            ordinal = next((index for index, frame in enumerate(s.page.frames) if frame is submit_frame), -1)
+            if ordinal < 0 or s.submit_document is None or not s.submit_origin or s.submit_host is None:
+                raise _FrameBindingError("frame_stale")
+            await self._validate_frame_lease_entry(s, SimpleNamespace(
+                frame=submit_frame, document=s.submit_document, origin=s.submit_origin,
+                host=s.submit_host, ordinal=ordinal,
+            ))
+            if await submit_frame.evaluate(
+                "a => a[0].ownerDocument === a[1] && a[0].isConnected && (!a[2] || a[0].form === a[2])",
+                [submit, s.submit_document, s.submit_form],
+            ) is not True:
+                raise _FrameBindingError("frame_stale")
+            live_action = await submit_frame.evaluate(
+                "button => button.formAction || (button.form ? button.form.action : location.href)",
+                submit,
+            )
+            if live_action != s.auth_submit_action or _origin(live_action) != s.submit_origin:
+                raise _FrameBindingError("frame_stale")
+        if s.commit_guard is not None:
+            await s.commit_guard.evaluate("g => g.check()")
+
     async def _preflight(self,s):
         self._check_observed_request(s)
+        if s.mode == "auth" and s.cross_frame:
+            return await self._preflight_auth_cross_frame(s)
         if s.mode == "form":
             return await self._preflight_form(s)
         if s.request["expiresAt"]<int(time.time()*1000) or _origin(s.page.url)!=s.request["origin"]: raise ValueError
@@ -1931,14 +2305,20 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         if live["option_count"] != len(expected_options or []) or live["options"] != expected_options:
                             raise ValueError("changed checkout options")
         e=s.refs.get("submit")
-        if e is None and s.auto_submit: return
+        if e is None and (s.auto_submit or s.auth_manual_action): return
         if not e or not await e.is_visible() or not await e.is_enabled() or not await self._related_submit(s.page,s.form,s.scope,e): raise ValueError
         if await s.page.evaluate("a => !a[0].formAction || a[0].formAction === a[1]",[e,s.submit_action]) is not True: raise ValueError
     async def _pin_commit_guard(self, s):
         """One private browser lease; never expose its nodes or option mappings."""
-        if any(frame != s.page.main_frame for frame in s.field_frames.values()):
+        has_child_fields = any(frame != s.page.main_frame for frame in s.field_frames.values())
+        submit_frame = getattr(s, "submit_frame", None)
+        has_child_action = submit_frame is not None and submit_frame != s.page.main_frame
+        if has_child_fields or has_child_action:
             s.cross_frame = True
-            s.commit_guard = await self._pin_cross_frame_guard(s)
+            s.commit_guard = await self._pin_cross_frame_guard(
+                s,
+                allow_click=s.mode == "auth" and s.refs.get("submit") is not None,
+            )
             return
         nodes, slots = [], {}
         for field_id in s.ref_meta:
@@ -2191,6 +2571,10 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         phase="refresh_before_confirmation"; await self._refresh_same_stage(s)
                         phase="preflight_after_fill"; await self._preflight(s)
                         phase="confirmation"; await self._present_confirmation(s,c,bool(s.site))
+                    elif s.auth_manual_action:
+                        phase="refresh_before_manual_action"; await self._refresh_same_stage(s)
+                        phase="manual_action"; await self._preflight(s)
+                        s.status="filled"; s.key=None
                     elif s.auto_submit:
                         phase="auto_submit"; await self._wait_for_auto_submit(s)
                         phase="rebind"; await self._rebind_or_finish(s,c)
@@ -2293,7 +2677,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
     def close(self):
         i=self._identity(); return self._submit(self._close(i)) if i else {"status":"unavailable"}
 
-SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"mode":{"type":"string","enum":["form"],"description":"Explicit fill-only generic form; never clicks submit."},"ref":{"type":"string","description":"Opaque Chrome target ID for attach; ordinary actions use the handoff ref returned by the tool"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90}},"required":["action"],"additionalProperties":False}}
+SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"mode":{"type":"string","enum":["form"],"description":"Explicit fill-only generic form; never clicks submit."},"ref":{"type":"string","description":"Opaque Chrome target ID for attach; ordinary actions use the handoff ref returned by the tool"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90},"allow_ambiguous_auth_action":{"type":"boolean","description":"Explicit owner opt-in for one exact Continue/Next/Submit auth CTA on this open/attach; never valid for checkout composition."}},"required":["action"],"additionalProperties":False}}
 # Exact disjoint model payloads; identity and document authority never come from arguments.
 SCHEMA['description'] += ' For agent-shaped encrypted ENTRY, attach mode compose, discover_components, then present_composition. Choose optional fields and bounded group headings/order; required fields cannot be omitted. No purchase authority.'
 _props = SCHEMA['parameters']['properties']

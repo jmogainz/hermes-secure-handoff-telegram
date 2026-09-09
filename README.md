@@ -69,7 +69,7 @@ See [the compatibility matrix](docs/compatibility.md) for supported control shap
 
 ### Authentication
 
-The controller can publish a bounded stage containing typed `identifier`, `password`, `one_time_code`, email, phone, and other supported controls. It rebinds after React-style rerenders and mints a fresh request for the next stage.
+The controller can publish a bounded stage containing typed `identifier`, `password`, `one_time_code`, email, phone, and other supported controls. It rebinds after React-style rerenders and mints a fresh request for the next stage. Auth controls may be discovered inside one visible, eligible HTTPS child frame (such as a provider-hosted sign-in surface); the frame origin, labels, selectors, and values remain private, while the Mini App receives only generic field metadata. Explicit `Sign in`/`Log in`/`Verify` actions can be guarded in their owning frame. `Continue`/`Next`/`Submit` are fill-only by default; an explicit owner opt-in on the exact `open`/`attach` call can authorize one exact continuation, consumed once. Custom widgets, shadow controls, CAPTCHA, passkeys, MFA, and provider challenges remain human-owned.
 
 ### Checkout
 

@@ -177,7 +177,7 @@ async def test_nondefault_range_domain_not_published(fixture, attrs):
     assert result['status'] != 'waiting_for_handoff'
     assert not c.bot.sent
 
-@pytest.mark.parametrize('extra', [{'demo': True}, {'url': 9}, {'timeout': True}, {'mode': []}, {'selector': '#password'}])
+@pytest.mark.parametrize('extra', [{'demo': True}, {'url': 9}, {'timeout': True}, {'mode': []}, {'selector': '#password'}, {'allow_ambiguous_auth_action': 'true'}])
 def test_actual_tool_payload_is_strictly_validated(extra):
     c = SecureHandoffController(Ctx())
     c._identity = lambda: IDENTITY

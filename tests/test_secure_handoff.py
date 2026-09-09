@@ -159,6 +159,159 @@ async def test_real_chrome_encrypted_submit_reuses_demo_context_and_rejects_repl
 
 
 @pytest.mark.asyncio
+async def test_bind_auth_stage_supports_native_controls_in_https_child_frame(tmp_path):
+    site = start_demo()
+    provider = start_demo()
+    controller = await disposable_controller(tmp_path)
+    identity = (7, 8, 42)
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        await session.page.set_content(
+            f'<main><iframe title="Apple Account sign in" src="{provider.origin}/login"></iframe></main>'
+        )
+        frame = session.page.frames[-1]
+        await frame.wait_for_load_state("domcontentloaded")
+        await frame.set_content(
+            '<form method="post" action="/login">'
+            '<input name="username" autocomplete="username" type="text">'
+            '<input name="password" autocomplete="current-password" type="password">'
+            '<button type="submit">Sign in</button></form>'
+        )
+        await controller._bind_auth_stage(session)
+        assert session.cross_frame is True
+        assert session.field_frames["f0"] is frame
+        assert session.field_frames["f1"] is frame
+        assert session.submit_frame is frame
+        assert [field["type"] for field in session.ref_meta.values()] == ["text", "password"]
+        controller.bot = Bot()
+        result = await controller._present(session, SimpleNamespace(bot=controller.bot))
+        assert result["status"] == "waiting_for_handoff", result
+        assert session.cross_frame is True
+        assert session.commit_guard is not None
+        aes, iv = b"i" * 32, b"j" * 12
+        body = json.dumps({"values": {"f0": "demo", "f1": "demo-pass"}}).encode()
+        wrapped = session.key.public_key().encrypt(
+            aes,
+            padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+        )
+        raw = json.dumps({
+            "v": 3,
+            "id": session.request["id"],
+            "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
+            "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),
+            "ciphertext": base64.urlsafe_b64encode(
+                AESGCM(aes).encrypt(iv, body, session.request["id"].encode())
+            ).decode().rstrip("="),
+        })
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=8, type="private"),
+            effective_message=SimpleNamespace(
+                message_thread_id=42,
+                web_app_data=SimpleNamespace(data=raw),
+            ),
+        )
+        with pytest.raises(BaseException):
+            await controller._web_data(update, SimpleNamespace(bot=controller.bot))
+        assert session.status == "submitted"
+        await frame.wait_for_load_state("domcontentloaded")
+        assert frame.url.endswith("/account")
+    finally:
+        await controller._close(identity)
+        site.close()
+        provider.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_frame_ambiguous_continue_is_fill_only(tmp_path):
+    site = start_demo()
+    provider = start_demo()
+    controller = await disposable_controller(tmp_path)
+    identity = (7, 8, 42)
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        await session.page.set_content(
+            f'<main><iframe title="Apple Account sign in" src="{provider.origin}/login"></iframe></main>'
+        )
+        frame = session.page.frames[-1]
+        await frame.wait_for_load_state("domcontentloaded")
+        await frame.set_content(
+            '<form method="post" action="/login">'
+            '<input name="username" autocomplete="username" type="text">'
+            '<button type="submit">Continue</button></form>'
+        )
+        await controller._bind_auth_stage(session)
+        assert session.auth_manual_action is True
+        assert "submit" not in session.refs
+        controller.bot = Bot()
+        result = await controller._present(session, SimpleNamespace(bot=controller.bot))
+        assert result["status"] == "waiting_for_handoff", result
+        aes, iv = b"k" * 32, b"l" * 12
+        body = json.dumps({"values": {"f0": "demo"}}).encode()
+        wrapped = session.key.public_key().encrypt(
+            aes,
+            padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+        )
+        raw = json.dumps({
+            "v": 3,
+            "id": session.request["id"],
+            "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
+            "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),
+            "ciphertext": base64.urlsafe_b64encode(
+                AESGCM(aes).encrypt(iv, body, session.request["id"].encode())
+            ).decode().rstrip("="),
+        })
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=8, type="private"),
+            effective_message=SimpleNamespace(
+                message_thread_id=42,
+                web_app_data=SimpleNamespace(data=raw),
+            ),
+        )
+        with pytest.raises(BaseException):
+            await controller._web_data(update, SimpleNamespace(bot=controller.bot))
+        assert session.status == "filled"
+        assert await frame.locator("input").input_value() == "demo"
+    finally:
+        await controller._close(identity)
+        site.close()
+        provider.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_auth_continuation_approves_one_ambiguous_child_action(tmp_path):
+    site = start_demo()
+    provider = start_demo()
+    controller = await disposable_controller(tmp_path)
+    identity = (7, 8, 42)
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        await session.page.set_content(
+            f'<main><iframe title="Apple Account sign in" src="{provider.origin}/login"></iframe></main>'
+        )
+        frame = session.page.frames[-1]
+        await frame.wait_for_load_state("domcontentloaded")
+        await frame.set_content(
+            '<form method="post" action="/login">'
+            '<input name="username" autocomplete="username" type="text">'
+            '<button type="submit">Continue</button></form>'
+        )
+        session.auth_action_approved = True
+        await controller._bind_auth_stage(session)
+        assert session.auth_manual_action is False
+        assert "submit" in session.refs
+        assert session.auth_action_approved is False
+        controller.bot = Bot()
+        result = await controller._present(session, SimpleNamespace(bot=controller.bot))
+        assert result["status"] == "waiting_for_handoff", result
+    finally:
+        await controller._close(identity)
+        site.close()
+        provider.close()
+
+
+@pytest.mark.asyncio
 async def test_bind_auth_stage_accepts_identifier_only_and_secret_only_stages(tmp_path):
     site = start_demo()
     controller = await disposable_controller(tmp_path)
