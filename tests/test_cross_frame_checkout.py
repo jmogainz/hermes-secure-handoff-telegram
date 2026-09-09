@@ -383,13 +383,59 @@ async def test_cross_frame_entry_expiry_and_cancel_leave_no_capability(cross_fra
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shape", ["custom", "blank", "canvas", "generic", "top-custom", "invisible", "http"])
+async def test_cross_frame_discovery_ignores_hidden_provider_helper_frame(cross_frame_controller):
+    controller, page, payment = cross_frame_controller
+    await page.set_content(
+        f'<main><form action="/purchase"><input required autocomplete="cc-number">'
+        f'<iframe title="payment fields" src="{payment.origin}/checkout-frame"></iframe>'
+        f'<iframe title="invisible security helper" style="display:none" src="{payment.origin}/checkout-frame"></iframe>'
+        '<button type="button">Pay</button></form></main>'
+    )
+    for frame in page.frames[1:]:
+        await frame.wait_for_load_state("domcontentloaded")
+        await frame.locator("input").evaluate_all("els => els.forEach(e => e.required = true)")
+    attached = json.loads(await asyncio.to_thread(controller.tool, {
+        "action": "attach", "origin": page.url.split("/login")[0], "mode": "compose"
+    }))
+    assert attached["status"] == "attached"
+    found = json.loads(await asyncio.to_thread(controller.tool, {
+        "action": "discover_components", "session_ref": attached["session_ref"]
+    }))
+    assert found["status"] == "composition_available", found
+    assert [ref["kind"] for ref in found["refs"]].count("card_number") == 2
+
+
+@pytest.mark.asyncio
+async def test_cross_frame_helper_becoming_visible_invalidates_lease(cross_frame_controller):
+    controller, page, payment = cross_frame_controller
+    await page.set_content(
+        f'<main><form action="/purchase"><input required autocomplete="cc-number">'
+        f'<iframe title="payment fields" src="{payment.origin}/checkout-frame"></iframe>'
+        f'<iframe title="invisible security helper" style="display:none" src="{payment.origin}/checkout-frame"></iframe>'
+        '<button title="Pay" type="button">Pay</button></form></main>'
+    )
+    for frame in page.frames[1:]:
+        await frame.wait_for_load_state("domcontentloaded")
+        await frame.locator("input").evaluate_all("els => els.forEach(e => e.required = true)")
+    attached = json.loads(await asyncio.to_thread(controller.tool, {
+        "action": "attach", "origin": page.url.split("/login")[0], "mode": "compose"
+    }))
+    found = json.loads(await asyncio.to_thread(controller.tool, {
+        "action": "discover_components", "session_ref": attached["session_ref"]
+    }))
+    assert found["status"] == "composition_available", found
+    await page.locator("iframe").nth(1).evaluate("e => e.style.display = 'block'")
+    await asyncio.sleep(0.05)
+    with pytest.raises(ValueError):
+        await controller.sessions[IDENT].commit_guard.evaluate("g => g.check()")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["custom", "blank", "canvas", "generic", "top-custom", "http"])
 async def test_cross_frame_discovery_rejects_unsupported_embedded_controls(cross_frame_controller, shape):
     controller, page, payment = cross_frame_controller
     if shape in {"custom", "blank", "canvas", "generic", "top-custom"}:
         frame_markup = f'<iframe src="{payment.origin}/checkout-frame"></iframe>'
-    elif shape == "invisible":
-        frame_markup = f'<iframe style="display:none" src="{payment.origin}/checkout-frame"></iframe>'
     else:
         frame_markup = '<iframe src="http://processor.example/fields"></iframe>'
     await page.set_content(

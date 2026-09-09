@@ -29,7 +29,7 @@
 - Checkout values are accepted only in the encrypted envelope and are decrypted immediately before the exact private Playwright mutation; plaintext buffers and Mini App controls are cleared after encryption and on page teardown.
 - A checkout field submission never clicks `Buy`, `Pay`, `Purchase`, or equivalent. It fills the exact bound fields and publishes a fresh, field-free `payment_confirmation` request.
 - Only an explicit confirmation envelope for the same owner/chat/thread, page/frame/document generation, checkout scope, origin, and bound payment action may trigger the final click.
-- Cross-origin child frames are considered only when their URL is HTTPS, visible/editable, semantically classified as supported secure/payment fields, and structurally contained by the top-level checkout scope. Any hidden, blank, custom, detached, or provider-challenge frame in the active scope rejects the binding. No provider host, selector, API key, or site name is hardcoded.
+- Cross-origin child frames are considered only when their URL is HTTPS, visible/editable, semantically classified as supported secure/payment fields, and structurally contained by the top-level checkout scope. Non-rendered helper frames are ignored as inactive; blank, visible custom, detached, or provider-challenge frames reject the binding, and a helper becoming visible after binding invalidates the lease. No provider host, selector, API key, or site name is hardcoded.
 - Provider chooser, CAPTCHA, passkey, MFA, 3DS, and signup controls are never solved or bypassed. A post-payment `submitted` status means the browser action was accepted, not that the charge or domain purchase succeeded.
 
 ---
@@ -86,7 +86,7 @@ Expected: FAIL because the v3 contract and checkout field types do not exist yet
 2. Keep ordinary login stages distinct from checkout stages; detect checkout from supported payment types or a bounded payment-action label plus billing/checkout semantics, never from a named site.
 3. Store private frame, document, scope, origin, and element bindings; expose only safe field metadata and the top-level target origin.
 4. Add preflight checks for frame attachment, exact document generation, connected editable controls, frame-origin integrity, scope containment, same-origin form/action, and unique submit action.
-5. Add synthetic same-origin and cross-origin frame fixtures with visible card/expiry/CVC inputs and a top-level payment action; ensure hCaptcha-like hidden frames reject the binding rather than being ignored.
+5. Add synthetic same-origin and cross-origin frame fixtures with visible card/expiry/CVC inputs and a top-level payment action; ensure hCaptcha-like non-rendered helper frames are ignored while visible unsupported frames reject and later helper visibility invalidates the lease.
 6. Run focused binding/fixture tests and confirm no field values or frame query strings appear in results or receipts.
 
 ### Task 4: Implement the two-stage checkout confirmation gate

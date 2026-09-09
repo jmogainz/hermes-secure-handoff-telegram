@@ -107,8 +107,10 @@ host chain; child handles are mutated only inside that Frame.
 
 Checkboxes, color and range are rejected in this composition version because
 their existing native renderer has a default state rather than genuinely empty
-entry. Large search-selects (over 64 choices), file inputs, custom widgets,
-general forms remain top-document only; HTTP/invisible frames, custom widgets,
+entry. Large search-selects (over 64 choices), file inputs,
+general forms remain top-document only; HTTP frames and non-rendered helper frames
+are not entry controls (a helper becoming visible after binding invalidates the
+lease), while custom widgets,
 shadow controls, browser dialogs and multiple/ambiguous scopes also fail closed.
 Unsupported controls cannot be hidden to force acceptance. Legacy non-composed
 form compatibility is unchanged. No universal website compatibility claim.

@@ -861,7 +861,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         return controls
 
     async def _validate_scope_iframes(self, scope):
-        """Reject hidden or detached iframe hosts in the exact active scope."""
+        """Validate active iframe hosts; non-rendered helper frames are inert."""
         scope_element = scope.as_element() if hasattr(scope, "as_element") else scope
         if scope_element is None:
             raise _FrameBindingError("frame_stale")
@@ -877,7 +877,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                     }
                     return true;
                 }"""):
-                    raise _FrameBindingError("frame_unsupported")
+                    continue
             except _FrameBindingError:
                 raise
             except Exception:
@@ -910,7 +910,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                     if not await self._frame_host_contained(page, frame, scope):
                         continue
                     if not await self._frame_host_in_scope(page, frame, scope, frame_host):
-                        raise _FrameBindingError("frame_unsupported")
+                        continue
                     frame_origin = _origin(frame.url)
                 except _FrameBindingError:
                     raise
