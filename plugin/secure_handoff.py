@@ -76,6 +76,22 @@ def _origin(url: str) -> str:
     if ":" in host: host = f"[{host}]"
     return f"https://{host}" + (f":{port}" if port is not None and port != 443 else "")
 
+def _frame_origin(url: str) -> str:
+    """Validate a child URL while discarding provider query/fragment data."""
+    if not isinstance(url, str) or not url or len(url) > 65536:
+        raise ValueError("invalid frame URL")
+    p = urlsplit(url)
+    return _origin(f"{p.scheme}://{p.netloc}")
+
+async def _read_frame_url(frame) -> str:
+    try:
+        value = await frame.evaluate("() => location.href")
+        if isinstance(value, str) and value:
+            return value
+    except Exception:
+        pass
+    return frame.url
+
 
 def _normalise_option_label(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
@@ -333,6 +349,8 @@ class Session:
     auth_submit_action: str = field(default="", repr=False)
     auth_manual_action: bool = False
     auth_action_approved: bool = False
+    action_candidates: list[dict] = field(default_factory=list, repr=False)
+    action_selection_required: bool = False
     field_frame_ordinals: dict[str, int] = field(default_factory=dict, repr=False)
     field_source_labels: dict[str, str] = field(default_factory=dict, repr=False)
     cross_frame: bool = False
@@ -399,7 +417,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             except OSError: pass
             with path.open("a",encoding="utf-8") as handle:
                 row={"v":3,"id":s.request["id"],"status":s.status,"thread":s.thread,"time":int(time.time()*1000)}
-                if reason in {"expiry","refresh_stage","preflight_before_decrypt","decrypt","preflight_after_decrypt","fill","refresh_before_click","refresh_before_confirmation","preflight_after_fill","click","auto_submit","rebind","refresh_before_manual_action","manual_action"}: row["reason"]=reason
+                if reason in {"expiry","refresh_stage","preflight_before_decrypt","decrypt","preflight_after_decrypt","fill","refresh_before_click","refresh_before_confirmation","preflight_after_fill","click","auto_submit","rebind","refresh_before_manual_action","manual_action","action_selection"}: row["reason"]=reason
                 handle.write(json.dumps(row,separators=(",",":"))+"\n")
         except Exception: pass
     def _submit(self,coro):
@@ -570,7 +588,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                     if not await self._frame_host_in_scope(page, frame, top_scope, frame_host):
                         continue
                     try:
-                        frame_origin = _origin(frame.url)
+                        frame_origin = _frame_origin(await _read_frame_url(frame))
                     except Exception:
                         frame_origin = None
                     frame_document = await frame.evaluate_handle("() => document")
@@ -655,27 +673,45 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         scope = group["scope"]
         candidates = group["candidates"]
         split_otp = len(candidates) > 1 and all(kind == "otp" for kind, _, _ in candidates)
-        if form is None and not adapter.allow_formless:
-            raise ValueError
         if (split_otp and not 2 <= len(candidates) <= 8) or (not split_otp and len(candidates) > 4):
             raise ValueError
         if not split_otp and len({kind for kind, _, _ in candidates}) != len(candidates):
             raise ValueError
-        submit = await self._find_submit(frame, form, scope, adapter, allow_missing=split_otp)
+        submit_candidates = await self._find_submit_candidates(frame, form, scope, adapter, allow_missing=split_otp)
+        if len(submit_candidates) > 4:
+            raise ValueError("too many auth actions")
+        action_selection_required = len(submit_candidates) > 1
+        submit = submit_candidates[0] if len(submit_candidates) == 1 else None
+        if form is None and not adapter.allow_formless:
+            auth_signal = any(
+                kind in {"password", "otp"}
+                or set(metadata["autocomplete"].split()) & {"username", "current-password", "one-time-code"}
+                for kind, _, metadata in candidates
+            )
+            if frame == page.main_frame or not auth_signal or not submit_candidates:
+                raise ValueError
         auth_manual_action = False
         ambiguous_auth_action = False
         allow_ambiguous_action = s.auth_action_approved
         s.auth_action_approved = False
+        s.action_candidates = []
+        s.action_selection_required = False
         if submit is not None:
             action_text = await submit.evaluate(
                 "e => (e.innerText || e.getAttribute('value') || e.getAttribute('aria-label') || '').trim().toLowerCase()"
             )
-            if action_text not in {"continue", "next", "sign in", "log in", "login", "verify", "verify code", "submit"}:
+            if not re.search(r"\b(?:sign\s+in|log\s+in|login|verify|continue|next|submit)\b", action_text):
                 raise ValueError("not an auth action")
-            if action_text in {"continue", "next", "submit"}:
+            if action_text == "verify" and not any(kind == "otp" for kind, _, _ in candidates):
+                raise ValueError("not an auth action")
+            provider_owned_action = any(token in action_text for token in ("passkey", "security key", "captcha", "hcaptcha"))
+            if provider_owned_action:
+                auth_manual_action = True
+                submit = None
+            if re.match(r"^(?:continue|next|submit)\b", action_text):
                 ambiguous_auth_action = True
                 explicit = any(
-                    metadata["autocomplete"] in {"username", "current-password", "one-time-code"}
+                    set(metadata["autocomplete"].split()) & {"username", "current-password", "one-time-code"}
                     for _, _, metadata in candidates
                 )
                 if not (allow_ambiguous_action or explicit):
@@ -685,16 +721,28 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                     submit = None
             else:
                 explicit = any(
-                    metadata["autocomplete"] in {"username", "current-password", "one-time-code"}
+                    set(metadata["autocomplete"].split()) & {"username", "current-password", "one-time-code"}
                     for _, _, metadata in candidates
                 )
                 if not explicit and not any(kind in {"password", "otp"} for kind, _, _ in candidates):
                     raise ValueError("not an auth stage")
-            if any(metadata["autocomplete"] == "new-password" for _, _, metadata in candidates):
+            if any("new-password" in metadata["autocomplete"].split() for _, _, metadata in candidates):
                 raise ValueError("registration is fill-only")
-        local_action = await frame.evaluate("form => form.action", form) if form else frame.url
-        if _origin(local_action) != group["origin"]:
+        local_action = await frame.evaluate("form => form.action", form) if form else await _read_frame_url(frame)
+        local_action_origin = _frame_origin(local_action) if frame != page.main_frame else _origin(local_action)
+        if local_action_origin != group["origin"]:
             raise ValueError("auth action origin mismatch")
+        if action_selection_required and not allow_ambiguous_action:
+            action_texts = [
+                await handle.evaluate(
+                    "e => (e.innerText || e.getAttribute('value') || e.getAttribute('aria-label') || '').trim().toLowerCase()"
+                )
+                for handle in submit_candidates
+            ]
+            if any(re.match(r"^(?:continue|next|submit)\b", text) for text in action_texts):
+                route = urlsplit(local_action).path.lower()
+                if not any(token in route for token in ("/login", "/signin", "/sign-in", "/auth", "/verify")):
+                    raise ValueError("ambiguous action outside auth route")
         if ambiguous_auth_action and not allow_ambiguous_action:
             route = urlsplit(local_action).path.lower()
             if not any(token in route for token in ("/login", "/signin", "/sign-in", "/auth", "/verify")):
@@ -704,7 +752,8 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             override = await frame.evaluate("button => button.formAction || ''", submit) or ""
             if override:
                 local_submit_action = override
-            if _origin(local_submit_action) != group["origin"]:
+            submit_action_origin = _frame_origin(local_submit_action) if frame != page.main_frame else _origin(local_submit_action)
+            if submit_action_origin != group["origin"]:
                 raise ValueError("auth submit origin mismatch")
         cross_frame = frame != page.main_frame
         s.document = top_document
@@ -714,6 +763,29 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         s.submit_action = page.url if cross_frame else local_submit_action
         s.auth_submit_action = local_submit_action
         s.auth_manual_action = auth_manual_action
+        action_records = []
+        for handle in submit_candidates:
+            action_text = await handle.evaluate(
+                "e => (e.innerText || e.getAttribute('value') || e.getAttribute('aria-label') || '').trim().toLowerCase()"
+            )
+            action_route = await frame.evaluate(
+                "button => button.formAction || (button.form ? button.form.action : location.href)", handle
+            )
+            action_route_origin = _frame_origin(action_route) if frame != page.main_frame else _origin(action_route)
+            if action_route_origin != group["origin"]:
+                raise ValueError("auth action origin mismatch")
+            action_records.append({
+                "handle": handle,
+                "frame": frame,
+                "document": group["document"],
+                "origin": group["origin"],
+                "host": group["host"],
+                "ordinal": group["ordinal"],
+                "form": form,
+                "scope": scope,
+                "route": action_route,
+                "provider_owned": any(token in action_text for token in ("passkey", "security key", "captcha", "hcaptcha")),
+            })
         s.auth_container = top_scope if cross_frame else await frame.evaluate_handle(
             "e => e.closest('dialog, [role=dialog], main') || document.body", candidates[0][1]
         )
@@ -735,6 +807,8 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         s.auth_field_forms = {}
         s.auth_form_actions = {}
         s.cross_frame = cross_frame
+        s.action_candidates = action_records if action_selection_required else []
+        s.action_selection_required = action_selection_required
         s.auto_submit = split_otp and submit is None
         labels = {
             "text": "Username or email",
@@ -815,6 +889,8 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         s.submit_form = None
         s.auth_submit_action = ""
         s.auth_manual_action = False
+        s.action_candidates = []
+        s.action_selection_required = False
         s.checkout_action = None
         s.auto_submit = False
 
@@ -1121,7 +1197,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         continue
                     if not await self._frame_host_in_scope(page, frame, scope, frame_host):
                         continue
-                    frame_origin = _origin(frame.url)
+                    frame_origin = _frame_origin(await _read_frame_url(frame))
                 except _FrameBindingError:
                     raise
                 except Exception:
@@ -1388,7 +1464,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         try:
             if frame.is_detached() or s.page.frames[entry.ordinal] is not frame:
                 raise _FrameBindingError("frame_stale")
-            if _origin(frame.url) != entry.origin:
+            if _frame_origin(await _read_frame_url(frame)) != entry.origin:
                 raise _FrameBindingError("frame_stale")
             if await frame.evaluate("d => d === document", entry.document) is not True:
                 raise _FrameBindingError("frame_stale")
@@ -1657,34 +1733,69 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             const scopeOf = el => el.closest('dialog, [role=dialog], main') || document.body;
             return scopeOf(btn) === scope;
         }""",[handle,form,scope]) is True
-    async def _find_submit(self,page,form,scope,adapter,allow_missing=False):
+    async def _find_submit_candidates(self,page,form,scope,adapter,allow_missing=False):
         found=[]
+        async def append_unique(handle):
+            for existing in found:
+                if await page.evaluate("a => a[0]===a[1]", [handle, existing]) is True:
+                    return
+            found.append(handle)
+        async def action_semantic(handle):
+            return await handle.evaluate(
+                """e => {
+                    const raw = e.innerText || e.getAttribute('value') || e.getAttribute('aria-label') || '';
+                    const text = String(raw).trim().toLowerCase()
+                        .split(String.fromCharCode(10)).join(' ')
+                        .split(String.fromCharCode(9)).join(' ');
+                    return ['sign in', 'log in', 'login', 'verify', 'continue', 'next', 'submit']
+                        .some(word => text.includes(word));
+                }"""
+            ) is True
         locators=await page.locator("form button[type=submit],form button:not([type]),form input[type=submit],button[type=submit]").all() if form else []
         for locator in locators:
-            if not await locator.is_visible() or not await locator.is_enabled(): continue
+            if not await locator.is_visible(): continue
             handle=await locator.element_handle()
             if handle and await self._related_submit(page,form,scope,handle):
-                duplicate=False
-                for existing in found:
-                    if await page.evaluate("a => a[0]===a[1]",[handle,existing]) is True:
-                        duplicate=True; break
-                if not duplicate: found.append(handle)
-        if len(found)==1: return found[0]
-        if found: raise ValueError
-        for label in adapter.submit_labels:
-            locator=page.get_by_role("button", name=label, exact=True)
-            if await locator.count()!=1: continue
-            if not await locator.is_visible() or not await locator.is_enabled(): continue
-            handle=await locator.element_handle()
-            if handle and await self._related_submit(page,form,scope,handle): return handle
-        for label in adapter.submit_labels:
-            locator=page.get_by_text(label, exact=True)
-            if await locator.count()!=1: continue
-            handle=await locator.element_handle()
-            if not handle or not await locator.is_visible() or not await locator.is_enabled(): continue
-            if await self._related_submit(page,form,scope,handle): return handle
-        if allow_missing: return None
-        raise ValueError
+                await append_unique(handle)
+        allowed = {label.strip().lower() for label in adapter.submit_labels}
+        labeled=[]
+        for handle in found:
+            text=await handle.evaluate("e => (e.innerText || e.getAttribute('value') || e.getAttribute('aria-label') || '').trim().toLowerCase()")
+            if text in allowed: labeled.append(handle)
+        if labeled:
+            found=labeled
+        elif found:
+            semantic=[]
+            for handle in found:
+                if await action_semantic(handle): semantic.append(handle)
+            if semantic:
+                found=semantic
+            elif len(found)>1:
+                raise ValueError
+        if not found:
+            for label in adapter.submit_labels:
+                locator=page.get_by_role("button", name=label, exact=True)
+                for candidate in await locator.all():
+                    if not await candidate.is_visible(): continue
+                    handle=await candidate.element_handle()
+                    if handle and await self._related_submit(page,form,scope,handle):
+                        await append_unique(handle)
+                locator=page.get_by_text(label, exact=True)
+                for candidate in await locator.all():
+                    if not await candidate.is_visible(): continue
+                    handle=await candidate.element_handle()
+                    if handle and await self._related_submit(page,form,scope,handle):
+                        await append_unique(handle)
+        for candidate in await page.locator('button,[role="button"],input[type=submit]').all():
+            if not await candidate.is_visible() or not await action_semantic(candidate): continue
+            handle=await candidate.element_handle()
+            if handle and await self._related_submit(page,form,scope,handle):
+                await append_unique(handle)
+        if len(found)>4:
+            raise ValueError("too many auth actions")
+        if not found and allow_missing: return []
+        if not found: raise ValueError
+        return found
     async def _deadline_expired(self, s, request_id):
         if not s.request or s.request["id"] != request_id: return
         self._invalidate(s, "expired")
@@ -1744,7 +1855,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         host = await frame.frame_element()
                         if host is None or not await self._frame_host_in_scope(s.page, frame, top_scope, host):
                             continue
-                        _origin(frame.url)
+                        _frame_origin(await _read_frame_url(frame))
                     except Exception:
                         continue
                 for e in await frame.locator("input").all():
@@ -1797,6 +1908,8 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             return {"status":s.status, "url":self._safe_origin(s), "reason":s.purchase_blocker}
         if s.status in {"filled", "human_action_required", "purchase_submitted", "outcome_unknown", "rejected", "cancelled", "expired"}:
             return {"status": s.status, "url": self._safe_origin(s)}
+        if s.status == "action_selection_required":
+            return {"status": s.status, "url": self._safe_origin(s), "action_count": len(s.action_candidates)}
         if s.request and s.key and s.status in {"waiting_for_handoff", "waiting_for_confirmation"}:
             return {"status": s.status, "url": self._safe_origin(s)}
         if await self._stage_detected(s): return await self._ensure_prompt(s)
@@ -1927,6 +2040,8 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             return await getattr(self, action)(args,ident)
         if action in composition.ACTIONS:
             return await self._composition(action,args,ident)
+        if action == "select_auth_action":
+            return await self._select_auth_action(args, ident)
         if action=="open":
             if args.get("mode") == "compose": return {"status":"invalid"}
             lease = object(); self._acquisitions[ident] = lease
@@ -2004,6 +2119,13 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             if not observed_purchase.valid_payload(payload["action"],payload): return '{"status":"invalid"}'
         elif payload.get("action") in composition.ACTIONS:
             if not composition.valid_payload(payload["action"],payload): return '{"status":"invalid"}'
+        elif payload.get("action") == "select_auth_action":
+            if (set(payload) != {"action", "session_ref", "ordinal"}
+                    or not isinstance(payload.get("session_ref"), str)
+                    or len(payload["session_ref"]) > 80
+                    or type(payload.get("ordinal")) is not int
+                    or not 1 <= payload["ordinal"] <= 4):
+                return '{"status":"invalid"}'
         elif (set(payload) - {"action","url","origin","mode","ref","text","timeout","allow_ambiguous_auth_action"}
             or any(not isinstance(payload[k], str) for k in ("action","url","origin","mode","ref","text") if k in payload)
             or ("timeout" in payload and (type(payload["timeout"]) is not int or not 0 <= payload["timeout"] <= 90))
@@ -2012,7 +2134,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         if (ident is None or len(ident) != 3 or type(ident[0]) is not int or type(ident[1]) is not int
             or ident[0] <= 0 or ident[1] != ident[0] or (ident[2] is not None and (type(ident[2]) is not int or ident[2] <= 0))
             or ident[0] not in self._owners()): result={"status":"rejected"}
-        elif payload.get("action") in {"open","attach","present","read","click","type","wait","close"} | composition.ACTIONS | observed_purchase.ACTIONS | purchase_sources.ACTIONS: result=self._submit(self._run(payload.get("action"),payload,ident))
+        elif payload.get("action") in {"open","attach","present","read","click","type","wait","close","select_auth_action"} | composition.ACTIONS | observed_purchase.ACTIONS | purchase_sources.ACTIONS: result=self._submit(self._run(payload.get("action"),payload,ident))
         else: result={"status":"invalid"}
         return json.dumps(result,separators=(",",":"))
 
@@ -2106,6 +2228,8 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 raise ValueError("expired publication")
             fields=[{"id":k, **dict(v)} for k,v in s.ref_meta.items() if k.startswith("f")]
             adapter=adapter_for_url(s.page.url); descriptor=adapter.stage_for(tuple(field["type"] for field in fields), checkout=s.mode=="checkout", form=s.mode=="form"); s.stage=descriptor.id; s.provider=adapter.name
+            if s.session_ref is None:
+                s.session_ref = composition.mint("ss_")
             if s.mode == "form":
                 s.request,s.key=make_request(_origin(s.page.url),fields,demo,stage=descriptor.id,provider=adapter.name,mode="form")
             elif s.mode == "checkout":
@@ -2132,7 +2256,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             self._assert_active(s)
             s.generation += 1
             s.used_ids.clear()
-            s.status="waiting_for_handoff"; self._arm_deadline(s); return {"status":"waiting_for_handoff","url":_origin(s.page.url)}
+            s.status="waiting_for_handoff"; self._arm_deadline(s); return {"status":"waiting_for_handoff","url":_origin(s.page.url),"session_ref":s.session_ref}
         except (Exception, asyncio.CancelledError) as error:
             if s.status not in {"cancelled","expired"}: s.status="publication_failed"
             self._scrub_binding(s)
@@ -2207,7 +2331,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 if connected is not True:
                     raise _FrameBindingError("frame_stale")
         submit = s.refs.get("submit")
-        if submit is None and (s.auto_submit or s.auth_manual_action):
+        if submit is None and (s.auto_submit or s.auth_manual_action or s.action_selection_required):
             return
         if submit is None or not await submit.is_visible() or not await submit.is_enabled():
             raise _FrameBindingError("frame_stale")
@@ -2278,7 +2402,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 if not e or not await e.is_visible() or not await e.is_enabled() or not await e.is_editable(): raise ValueError
                 if s.mode in {"checkout", "payment_confirmation"}:
                     frame=s.field_frames.get(field_id); expected_origin=s.field_origins.get(field_id); document=s.field_documents.get(field_id)
-                    if frame is None or frame.is_detached() or not expected_origin or _origin(frame.url)!=expected_origin: raise ValueError
+                    if frame is None or frame.is_detached() or not expected_origin or _frame_origin(await _read_frame_url(frame))!=expected_origin: raise ValueError
                     if await frame.evaluate("d => d === document",document) is not True: raise ValueError
                     host=e if frame == s.page.main_frame else await frame.frame_element()
                     if not await s.page.evaluate("a => a[0].ownerDocument === document && a[0].isConnected && a[1].contains(a[0])",[host,s.scope]): raise ValueError
@@ -2305,7 +2429,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         if live["option_count"] != len(expected_options or []) or live["options"] != expected_options:
                             raise ValueError("changed checkout options")
         e=s.refs.get("submit")
-        if e is None and (s.auto_submit or s.auth_manual_action): return
+        if e is None and (s.auto_submit or s.auth_manual_action or s.action_selection_required): return
         if not e or not await e.is_visible() or not await e.is_enabled() or not await self._related_submit(s.page,s.form,s.scope,e): raise ValueError
         if await s.page.evaluate("a => !a[0].formAction || a[0].formAction === a[1]",[e,s.submit_action]) is not True: raise ValueError
     async def _pin_commit_guard(self, s):
@@ -2508,6 +2632,149 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             raise ValueError("select label not found")
         return matches[0]["value"]
 
+    async def _commit_selected_action(self, s, candidate):
+        frame = candidate["frame"]
+        handle = candidate["handle"]
+        route = candidate["route"]
+        if frame == s.page.main_frame:
+            if not await self._related_submit(frame, candidate["form"], candidate["scope"], handle):
+                raise _FrameBindingError("action_stale")
+            if await s.page.evaluate(
+                "a => a[0].ownerDocument === a[1] && a[0].isConnected && a[2].contains(a[0])",
+                [handle, s.document, s.scope],
+            ) is not True:
+                raise _FrameBindingError("action_stale")
+            live_route = await s.page.evaluate(
+                "button => button.formAction || (button.form ? button.form.action : location.href)", handle
+            )
+            if live_route != route or _origin(live_route) != _origin(s.page.url):
+                raise _FrameBindingError("action_stale")
+            parent_nodes = []
+            for field_id, field_frame in s.field_frames.items():
+                if field_id.startswith("f") and field_frame == s.page.main_frame:
+                    parent_nodes.extend(s.field_parts.get(field_id) or [s.refs[field_id]])
+            guard = await s.page.evaluate_handle(PARENT_GUARD, {
+                "nodes": parent_nodes,
+                "form": candidate["form"],
+                "scope": s.scope,
+                "doc": s.document,
+                "action": handle,
+                "deadline": s.request["expiresAt"],
+                "submitAction": route,
+                "allowClick": True,
+            })
+            try:
+                await s.commit_guard.evaluate("g => g.check()")
+                result = await guard.evaluate("(g,a) => g.commit(a)", {
+                    "deadline": s.request["expiresAt"],
+                    "click": True,
+                    "index": len(parent_nodes),
+                })
+            finally:
+                await self._release_guard(guard)
+        else:
+            await self._validate_frame_lease_entry(s, SimpleNamespace(
+                frame=frame,
+                document=candidate["document"],
+                origin=candidate["origin"],
+                host=candidate["host"],
+                ordinal=candidate["ordinal"],
+            ))
+            if not await self._related_submit(frame, candidate["form"], candidate["scope"], handle):
+                raise _FrameBindingError("action_stale")
+            if await frame.evaluate(
+                "a => a[0].ownerDocument === a[1] && a[0].isConnected && (!a[2] || a[0].form === a[2])",
+                [handle, candidate["document"], candidate["form"]],
+            ) is not True:
+                raise _FrameBindingError("action_stale")
+            live_route = await frame.evaluate(
+                "button => button.formAction || (button.form ? button.form.action : location.href)", handle
+            )
+            if live_route != route or _origin(live_route) != candidate["origin"]:
+                raise _FrameBindingError("action_stale")
+            guard = await frame.evaluate_handle(CHILD_ACTION_GUARD, {
+                "action": handle,
+                "doc": candidate["document"],
+                "origin": candidate["origin"],
+                "deadline": s.request["expiresAt"],
+            })
+            try:
+                await s.commit_guard.evaluate("g => g.check()")
+                result = await guard.evaluate("(g,a) => g.commit(a)", {
+                    "deadline": s.request["expiresAt"],
+                    "click": True,
+                })
+            finally:
+                await self._release_guard(guard)
+        if result is not True:
+            raise _FrameBindingError("action_stale")
+        return True
+
+    async def _select_auth_action(self, args, ident):
+        if (set(args) != {"action", "session_ref", "ordinal"}
+                or not isinstance(args.get("session_ref"), str)
+                or len(args["session_ref"]) > 80
+                or type(args.get("ordinal")) is not int):
+            return {"status": "invalid"}
+        s = self.sessions.get(ident)
+        if (not s or s.session_ref != args["session_ref"]
+                or s.status != "action_selection_required"
+                or not s.action_selection_required):
+            return {"status": "rejected"}
+        ordinal = args["ordinal"]
+        async with s.lock:
+            if not self._current(s) or s.status != "action_selection_required":
+                return {"status": "rejected"}
+            if ordinal < 1 or ordinal > len(s.action_candidates):
+                return {"status": "invalid_action_selection", "action_count": len(s.action_candidates)}
+            candidate = s.action_candidates[ordinal - 1]
+            if candidate.get("provider_owned"):
+                s.action_selection_required = False
+                s.status = "human_action_required"
+                self._receipt(s, "provider_action")
+                s.key = None
+                self._scrub_binding(s)
+                if s.wake: s.wake.set()
+                provider_owned = True
+            else:
+                provider_owned = False
+                s.status = "action_submitting"
+                phase = "action_selection"
+                try:
+                    phase = "refresh_stage"
+                    await self._refresh_same_stage(s)
+                    phase = "preflight_after_fill"
+                    await self._preflight(s)
+                    s.action_selection_required = False
+                    phase = "click"
+                    await self._commit_selected_action(s, candidate)
+                    phase = "rebind"
+                    await self._rebind_or_finish(s, SimpleNamespace(bot=self.bot))
+                except asyncio.CancelledError:
+                    s.status = "outcome_unknown"
+                    self._receipt(s, phase)
+                    self._scrub_binding(s)
+                    if s.wake: s.wake.set()
+                    self._schedule_wake(s)
+                    raise
+                except Exception:
+                    s.status = "rejected"
+                    self._receipt(s, phase)
+                    self._scrub_binding(s)
+                if s.status in {"submitted", "stage_submitted", "rejected", "outcome_unknown"}:
+                    self._scrub_binding(s)
+                if s.wake: s.wake.set()
+        if s.status in {"submitted", "stage_submitted"}:
+            await self._send(SimpleNamespace(bot=self.bot), s.chat, s.thread, "Secure auth action submitted.")
+        elif s.status == "rejected":
+            await self._send(SimpleNamespace(bot=self.bot), s.chat, s.thread, "Secure auth action rejected; no retry was attempted.")
+        elif s.status == "human_action_required" and provider_owned:
+            await self._send(SimpleNamespace(bot=self.bot), s.chat, s.thread, "This provider authentication step requires your direct browser action; no action was clicked.")
+        self._schedule_wake(s)
+        result = {"status": s.status}
+        if provider_owned: result["reason"] = "provider_action_user_owned"
+        return result
+
     async def _web_data(self,u,c):
         raw=getattr(getattr(getattr(u,"effective_message",None),"web_app_data",None),"data",None)
         try: rid=json.loads(raw).get("id") if isinstance(raw,str) else None
@@ -2571,6 +2838,10 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         phase="refresh_before_confirmation"; await self._refresh_same_stage(s)
                         phase="preflight_after_fill"; await self._preflight(s)
                         phase="confirmation"; await self._present_confirmation(s,c,bool(s.site))
+                    elif s.action_selection_required:
+                        phase="action_selection"; await self._refresh_same_stage(s)
+                        phase="preflight_after_fill"; await self._preflight(s)
+                        s.status="action_selection_required"; s.key=None
                     elif s.auth_manual_action:
                         phase="refresh_before_manual_action"; await self._refresh_same_stage(s)
                         phase="manual_action"; await self._preflight(s)
@@ -2619,6 +2890,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         elif s.status=="human_action_required": await self._send(c,s.chat,s.thread,"Checkout fields filled. Complete the final purchase directly in the provider page; no purchase action was clicked.")
         elif s.status=="purchase_review_ready": await self._send(c,s.chat,s.thread,"Checkout facts are ready for review composition. No purchase action was clicked.")
         elif s.status=="filled": await self._send(c,s.chat,s.thread,"Secure handoff fields filled. No submit action was clicked.")
+        elif s.status=="action_selection_required": await self._send(c,s.chat,s.thread,f"Fields filled. Choose one of {len(s.action_candidates)} visible browser actions by ordinal (1-{len(s.action_candidates)}). No action was clicked.")
         elif s.status=="waiting_for_confirmation": await self._send(c,s.chat,s.thread,"Checkout details are ready. Review the browser page, then authorize the purchase.")
         elif s.status=="rejected": await self._send(c,s.chat,s.thread,"Secure handoff rejected.")
         elif s.status=="publication_failed": await self._send(c,s.chat,s.thread,"Secure handoff unavailable.")
@@ -2627,11 +2899,13 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
     def _safe_origin(self,s):
         try: return _origin(s.page.url)
         except Exception: return ""
-    def _wake_text(self,status,origin):
+    def _wake_text(self,status,origin,action_count=0):
         site=origin or "unknown"
+        choice = (f" There are {action_count} eligible browser actions; ask the owner to choose an ordinal, then call select_auth_action."
+                  if status == "action_selection_required" and action_count else "")
         return (
             "[secure-handoff wakeup] Encrypted Mini App handoff finished. "
-            f"Status: {status}. Site: {site}. Credentials are not included. "
+            f"Status: {status}. Site: {site}. Credentials are not included.{choice} "
             "Inspect the live browser and continue the current handoff task. "
             "If status is waiting_for_handoff, a new Mini App was published. "
             "If rejected, diagnose from receipts without reading field values. "
@@ -2642,13 +2916,14 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
     def _schedule_wake(self,s):
         if self.adapter is None or not self.loop or not self.loop.is_running(): return
         status,user,chat,thread,origin=s.status,s.user,s.chat,s.thread,self._safe_origin(s)
-        try: self.loop.create_task(self._wake_session(status,user,chat,thread,origin))
+        action_count = len(s.action_candidates) if status == "action_selection_required" else 0
+        try: self.loop.create_task(self._wake_session(status,user,chat,thread,origin,action_count))
         except Exception: pass
-    async def _wake_session(self,status,user,chat,thread,origin):
+    async def _wake_session(self,status,user,chat,thread,origin,action_count=0):
         adapter=self.adapter
-        if adapter is None or status not in {"submitted","filled","human_action_required","purchase_submitted","outcome_unknown","rejected","purchase_review_ready","waiting_for_handoff","waiting_for_confirmation","publication_failed","stage_submitted","composition_available"}: return
+        if adapter is None or status not in {"submitted","filled","human_action_required","purchase_submitted","outcome_unknown","rejected","purchase_review_ready","waiting_for_handoff","waiting_for_confirmation","publication_failed","stage_submitted","composition_available","action_selection_required"}: return
         source=SimpleNamespace(chat_id=str(chat),user_id=str(user),thread_id=str(thread) if thread is not None else None)
-        try: await self._deliver_wake(adapter,self._wake_text(status,origin),source)
+        try: await self._deliver_wake(adapter,self._wake_text(status,origin,action_count),source)
         except Exception: pass
     async def _deliver_wake(self,adapter,text,source):
         from gateway.config import Platform
@@ -2677,7 +2952,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
     def close(self):
         i=self._identity(); return self._submit(self._close(i)) if i else {"status":"unavailable"}
 
-SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close"]},"url":{"type":"string"},"origin":{"type":"string"},"mode":{"type":"string","enum":["form"],"description":"Explicit fill-only generic form; never clicks submit."},"ref":{"type":"string","description":"Opaque Chrome target ID for attach; ordinary actions use the handoff ref returned by the tool"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90},"allow_ambiguous_auth_action":{"type":"boolean","description":"Explicit owner opt-in for one exact Continue/Next/Submit auth CTA on this open/attach; never valid for checkout composition."}},"required":["action"],"additionalProperties":False}}
+SCHEMA={"name":"telegram_secure_handoff","description":"Use for owner-scoped secure handoff work in Hermes's dedicated Chrome profile. Supports generic auth and checkout stages; never submit secrets outside the encrypted Mini App.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["open","attach","present","read","click","type","wait","close","select_auth_action"]},"url":{"type":"string"},"origin":{"type":"string"},"mode":{"type":"string","enum":["form"],"description":"Explicit fill-only generic form; never clicks submit."},"ref":{"type":"string","description":"Opaque Chrome target ID for attach; ordinary actions use the handoff ref returned by the tool"},"text":{"type":"string"},"timeout":{"type":"integer","maximum":90},"ordinal":{"type":"integer","minimum":1,"maximum":4},"allow_ambiguous_auth_action":{"type":"boolean","description":"Explicit owner opt-in for one exact Continue/Next/Submit auth CTA on this open/attach; never valid for checkout composition."}},"required":["action"],"additionalProperties":False}}
 # Exact disjoint model payloads; identity and document authority never come from arguments.
 SCHEMA['description'] += ' For agent-shaped encrypted ENTRY, attach mode compose, discover_components, then present_composition. Choose optional fields and bounded group headings/order; required fields cannot be omitted. No purchase authority.'
 _props = SCHEMA['parameters']['properties']
@@ -2718,6 +2993,9 @@ for _action,_keys in [('discover_catalog_sources',['session_ref']),('request_sou
     SCHEMA['parameters']['oneOf'].append({'type':'object','additionalProperties':False,
         'required':['action']+_keys,'properties':{'action':{'const':_action},**{k:_props[k] for k in _keys}}})
 SCHEMA['description'] += ' After discover_components, discover_purchase_sources and select_purchase_sources explicitly arm composed checkout using only issued refs. First discover_catalog_sources and request_source_approval for an exact issued catalog_ref; wait for the owner encrypted Mini App grant. The owner must identify and review the original public nonpersonal product page. Source selection is not privacy certification or purchase authority; unsupported sources fail closed.'
+SCHEMA['parameters']['oneOf'].append({'type':'object','additionalProperties':False,
+    'required':['action','session_ref','ordinal'],
+    'properties':{'action':{'const':'select_auth_action'},'session_ref':_props['session_ref'],'ordinal':_props['ordinal']}})
 del _props, _legacy, _key, _prefix, _action, _keys
 
 def register(ctx):

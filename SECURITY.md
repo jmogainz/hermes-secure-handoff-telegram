@@ -39,8 +39,7 @@ general credential manager or payment processor.
   ElementHandles never cross into a parent `page.evaluate`; each frame owns its
   own private guard. A field-free boolean confirmation lacks bound transaction
   terms; field fill never authorizes payment.
-- CAPTCHA, 3DS, MFA, passkeys, provider security screens, and payment outcomes
-  remain user/provider-owned. The plugin never solves or bypasses them.
+- CAPTCHA, 3DS, MFA, passkeys, provider security screens, and payment outcomes remain user/provider-owned. The plugin never solves or bypasses them. An auth action ordinal is not a credential, MFA, passkey, or purchase approval.
 - The Mini App uses standard iOS `autocomplete` metadata, but Apple Passwords
   and payment autofill remain scoped to the Mini App's own origin. A target
   website origin cannot override that browser rule.

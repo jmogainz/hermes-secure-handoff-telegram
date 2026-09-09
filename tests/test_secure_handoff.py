@@ -175,19 +175,23 @@ async def test_bind_auth_stage_supports_native_controls_in_https_child_frame(tmp
             '<form method="post" action="/login">'
             '<input name="username" autocomplete="username" type="text">'
             '<input name="password" autocomplete="current-password" type="password">'
+            '<button type="submit">Continue</button>'
             '<button type="submit">Sign in</button></form>'
         )
         await controller._bind_auth_stage(session)
         assert session.cross_frame is True
         assert session.field_frames["f0"] is frame
         assert session.field_frames["f1"] is frame
-        assert session.submit_frame is frame
+        assert session.action_selection_required is True
+        assert len(session.action_candidates) == 2
+        assert "submit" not in session.refs
         assert [field["type"] for field in session.ref_meta.values()] == ["text", "password"]
         controller.bot = Bot()
         result = await controller._present(session, SimpleNamespace(bot=controller.bot))
         assert result["status"] == "waiting_for_handoff", result
         assert session.cross_frame is True
         assert session.commit_guard is not None
+        assert result["session_ref"] == session.session_ref
         aes, iv = b"i" * 32, b"j" * 12
         body = json.dumps({"values": {"f0": "demo", "f1": "demo-pass"}}).encode()
         wrapped = session.key.public_key().encrypt(
@@ -213,7 +217,18 @@ async def test_bind_auth_stage_supports_native_controls_in_https_child_frame(tmp
         )
         with pytest.raises(BaseException):
             await controller._web_data(update, SimpleNamespace(bot=controller.bot))
-        assert session.status == "submitted"
+        assert session.status == "action_selection_required"
+        assert await frame.locator('input[name="username"]').input_value() == "demo"
+        assert await frame.locator('input[name="password"]').input_value() == "demo-pass"
+        sent_text = " ".join(repr(message) for message in controller.bot.sent)
+        assert "Continue" not in sent_text
+        assert "Sign in" not in sent_text
+        selection = await controller._select_auth_action({
+            "action": "select_auth_action",
+            "session_ref": session.session_ref,
+            "ordinal": 2,
+        }, identity)
+        assert selection["status"] == "submitted"
         await frame.wait_for_load_state("domcontentloaded")
         assert frame.url.endswith("/account")
     finally:
@@ -277,6 +292,107 @@ async def test_cross_frame_ambiguous_continue_is_fill_only(tmp_path):
         await controller._close(identity)
         site.close()
         provider.close()
+
+
+@pytest.mark.asyncio
+async def test_formless_apple_shape_publishes_then_selects_live_action(tmp_path):
+    site = start_demo()
+    provider = start_demo()
+    controller = await disposable_controller(tmp_path)
+    identity = (7, 8, 42)
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        await session.page.set_content(f'<main><iframe src="{provider.origin}/login"></iframe></main>')
+        frame = session.page.frames[-1]
+        await frame.wait_for_load_state("domcontentloaded")
+        await frame.set_content(
+            '<main><input id="account" autocomplete="username webauthn" type="text">'
+            '<input type="password" style="display:none">'
+            '<button id="continue" disabled onclick="window.selected=1;document.body.innerHTML=\'Done\'">Continue</button>'
+            '<button id="passkey" onclick="window.selected=2;document.body.innerHTML=\'Done\'">'
+            'Sign in with Apple Account</button></main>'
+            '<script>account.oninput=()=>document.getElementById("continue").disabled=false</script>'
+        )
+        await controller._bind_auth_stage(session)
+        assert session.cross_frame is True
+        assert [meta["type"] for meta in session.ref_meta.values()] == ["text"]
+        assert session.action_selection_required is True
+        assert len(session.action_candidates) == 2
+        controller.bot = Bot()
+        result = await controller._present(session, SimpleNamespace(bot=controller.bot))
+        assert result["status"] == "waiting_for_handoff"
+        assert result["session_ref"] == session.session_ref
+
+        aes, iv = b"m" * 32, b"n" * 12
+        body = json.dumps({"values": {"f0": "demo"}}).encode()
+        wrapped = session.key.public_key().encrypt(
+            aes,
+            padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+        )
+        raw = json.dumps({
+            "v": 3,
+            "id": session.request["id"],
+            "wrappedKey": base64.urlsafe_b64encode(wrapped).decode().rstrip("="),
+            "iv": base64.urlsafe_b64encode(iv).decode().rstrip("="),
+            "ciphertext": base64.urlsafe_b64encode(
+                AESGCM(aes).encrypt(iv, body, session.request["id"].encode())
+            ).decode().rstrip("="),
+        })
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(id=8, type="private"),
+            effective_message=SimpleNamespace(
+                message_thread_id=42,
+                web_app_data=SimpleNamespace(data=raw),
+            ),
+        )
+        with pytest.raises(BaseException):
+            await controller._web_data(update, SimpleNamespace(bot=controller.bot))
+        assert session.status == "action_selection_required"
+        assert await frame.locator("#account").input_value() == "demo"
+        assert await frame.locator("#continue").is_enabled()
+        invalid = await controller._select_auth_action({
+            "action": "select_auth_action",
+            "session_ref": session.session_ref,
+            "ordinal": 3,
+        }, identity)
+        assert invalid == {"status": "invalid_action_selection", "action_count": 2}
+        assert session.status == "action_selection_required"
+        selection = await controller._select_auth_action({
+            "action": "select_auth_action",
+            "session_ref": session.session_ref,
+            "ordinal": 1,
+        }, identity)
+        assert selection["status"] == "submitted"
+        assert await frame.locator("body").inner_text() == "Done"
+    finally:
+        await controller._close(identity)
+        site.close()
+        provider.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_owned_auth_action_selection_is_user_only(tmp_path):
+    site = start_demo()
+    controller = await disposable_controller(tmp_path)
+    identity = (7, 8, 42)
+    try:
+        session = await controller._new_session(identity, site.login_url, demo=True)
+        session.session_ref = "ss_" + "a" * 32
+        session.status = "action_selection_required"
+        session.action_selection_required = True
+        session.action_candidates = [{"provider_owned": True}]
+        result = await controller._select_auth_action({
+            "action": "select_auth_action",
+            "session_ref": session.session_ref,
+            "ordinal": 1,
+        }, identity)
+        assert result == {"status": "human_action_required", "reason": "provider_action_user_owned"}
+        assert session.status == "human_action_required"
+        assert session.action_candidates == []
+    finally:
+        await controller._close(identity)
+        site.close()
 
 
 @pytest.mark.asyncio

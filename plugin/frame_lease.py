@@ -72,7 +72,11 @@ PARENT_GUARD = r"""({nodes,form,scope,doc,action,deadline,submitAction,allowClic
     const dispatch=EventTarget.prototype.dispatchEvent, nativeClick=HTMLElement.prototype.click;
     let dirty=false, internal=null, revoked=false, consumed=false;
 NAVIGATION_WATCH
-    const observer=new MutationObserver(()=>{if(!internal) dirty=true});
+    const observedNodes=action?[...nodes,action]:nodes;
+    const touchesObserved=node=>observedNodes.some(e=>e===node||e.contains?.(node)||node.contains?.(e));
+    const relevant=records=>records.some(m=>m.type==='attributes'||m.type==='characterData'
+      ?touchesObserved(m.target):touchesObserved(m.target)||[...m.addedNodes,...m.removedNodes].some(touchesObserved));
+    const observer=new MutationObserver(records=>{if(!internal&&relevant(records)) dirty=true});
     observer.observe(scope,{subtree:true,attributes:true,characterData:true,childList:true});
     const event=e=>{if(!internal || e.target!==internal) dirty=true};
     doc.addEventListener('input',event,true); doc.addEventListener('change',event,true);
@@ -131,7 +135,10 @@ CHILD_GUARD = r"""({nodes,doc,origin,deadline}) => {
     const dispatch=EventTarget.prototype.dispatchEvent;
     let dirty=false,internal=null,revoked=false;
 NAVIGATION_WATCH
-    const observer=new MutationObserver(()=>{if(!internal)dirty=true});
+    const touchesBound=node=>nodes.some(e=>e===node||e.contains?.(node)||node.contains?.(e));
+    const relevant=records=>records.some(m=>m.type==='attributes'||m.type==='characterData'
+      ?touchesBound(m.target):touchesBound(m.target)||[...m.addedNodes,...m.removedNodes].some(touchesBound));
+    const observer=new MutationObserver(records=>{if(!internal&&relevant(records))dirty=true});
     observer.observe(document.documentElement,{subtree:true,attributes:true,characterData:true,childList:true});
     const event=e=>{if(!internal||e.target!==internal)dirty=true};
     doc.addEventListener('input',event,true);doc.addEventListener('change',event,true);
