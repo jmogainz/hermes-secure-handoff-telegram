@@ -65,9 +65,15 @@ The frontend accepts:
 - v3 typed `auth` requests;
 - v3 typed `form` requests, with fill-only authority;
 - v3 typed `checkout` requests;
-- legacy v3 `payment_confirmation` metadata is recognized but blocked, with no submit action. Remote purchase execution requires a future immutable transaction-summary protocol.
+- v3 `purchase_approval` requests only when Hermes supplies a fresh immutable
+  observed-action contract and the user explicitly taps **Complete purchase**;
+- legacy v3 `payment_confirmation` metadata is recognized but blocked, with no
+  submit action.
 
-Checkout requests may contain bounded text, email, phone, number, password, OTP, card number, card expiry, CVC, and select fields. The frontend never receives prefilled values in request metadata.
+Checkout requests may contain bounded text, email, phone, number, password, OTP,
+card number, card expiry, CVC, and select fields. Frame-aware checkout fields
+may carry a bounded numeric `frameOrdinal` only; it is not a frame URL or a
+selector. The frontend never receives prefilled values in request metadata.
 
 General forms add textarea, checkbox, radio-as-select, date/time/month/week/local-datetime, URL, search, color and supported range controls. See `../docs/compatibility.md` for exact scope and limitations. Validation failures identify the field and clear entered values; cancellation/expiry/page teardown also scrub entries and prevent delayed encryption from sending.
 

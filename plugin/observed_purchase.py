@@ -9,14 +9,17 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, cast
 try:
     from .purchase_facts import PurchaseFactRegistry, FactRejected, _LEAF
     from .purchase_approval import approval_request
     from . import composition
+    from .frame_lease import CrossFrameLease, NAVIGATION_WATCH, PARENT_GUARD
 except ImportError:
     from purchase_facts import PurchaseFactRegistry, FactRejected, _LEAF
     from purchase_approval import approval_request
     import composition
+    from frame_lease import CrossFrameLease, NAVIGATION_WATCH, PARENT_GUARD
 
 ACTIONS = {'inspect_purchase', 'compose_purchase'}
 
@@ -42,18 +45,19 @@ PIN_OBSERVED = r"""({base,scope,originalScope,action,originalAction,facts,factGu
     const controls=[...doc.querySelectorAll('input,textarea,select')];
     const values=controls.map(e=>[e.value,e.checked,e.selectedIndex]);
     let dirty=false, revoked=false;
+NAVIGATION_WATCH
     const observer=new MutationObserver(()=>{dirty=true});
     observer.observe(scope,{subtree:true,attributes:true,characterData:true,childList:true});
     // All registered checkout fact nodes are contained in this exact scope.
     // Public catalog observations are historical snapshots, not live authority.
     const event=e=>{if(scope.contains(e.target)||controls.includes(e.target)) dirty=true};
     doc.addEventListener('input',event,true); doc.addEventListener('change',event,true);
-    const stop=()=>{observer.disconnect();doc.removeEventListener('input',event,true);doc.removeEventListener('change',event,true);values.length=0};
+    const stop=()=>{observer.disconnect();doc.removeEventListener('input',event,true);doc.removeEventListener('change',event,true);releaseNavigation();values.length=0};
     const lease={deadline,consumed:false};
     Object.defineProperty(lease,'revoked',{get:()=>revoked,set:v=>{if(v){revoked=true;stop();factGuard.close();base.revoked=true}}});
     lease.check=()=>{
         if(observer.takeRecords().length) dirty=true;
-        if(revoked || dirty || lease.consumed || Date.now()>=lease.deadline || document!==doc || location.href!==url) throw Error('stale approval');
+        if(revoked || dirty || lease.consumed || Date.now()>=lease.deadline || document!==doc || location.href!==url || navigation?.currentEntry!==initialEntry) throw Error('stale approval');
         base.check();
         if(sourceGuard && !sourceGuard.check(scope)) throw Error('changed acquisition');
         if(!factGuard.check(scope,false) || !factGuard.check(action,true)) throw Error('changed source');
@@ -73,7 +77,7 @@ PIN_OBSERVED = r"""({base,scope,originalScope,action,originalAction,facts,factGu
         return true;
     };
     try {lease.check();return lease} catch(e){lease.revoked=true;throw Error('invalid approval')}
-}""".replace('LEAF_FUNCTION', _LEAF)
+}""".replace('LEAF_FUNCTION', _LEAF).replace('NAVIGATION_WATCH', NAVIGATION_WATCH)
 
 
 class ObservedPurchaseMixin:
@@ -155,6 +159,7 @@ class ObservedPurchaseMixin:
         if not s or not s.session_ref or args['session_ref']!=s.session_ref: return {'status':'rejected'}
         async with s.lock:
             if not self._current(s) or s.status!='purchase_review_ready' or s.purchase_registry is None: return {'status':'rejected'}
+            fresh_parent = None
             try:
                 self._assert_active(s)
                 registry=s.purchase_registry
@@ -164,10 +169,38 @@ class ObservedPurchaseMixin:
                 deadline=min(s.request['expiresAt'],int(time.time()*1000+max(0,registry._deadline-registry._clock())*1000))
                 action=next(f.node for f in registry._facts.values() if f.kind=='action')
                 old=s.commit_guard
-                guard=await s.page.evaluate_handle(PIN_OBSERVED,{'base':old,'scope':registry._scope,'originalScope':s.scope,
+                if isinstance(old, CrossFrameLease):
+                    parent_nodes = []
+                    for field_id, frame in s.field_frames.items():
+                        if field_id.startswith('f') and frame == s.page.main_frame:
+                            parent_nodes.extend(s.field_parts.get(field_id) or [s.refs[field_id]])
+                    fresh_parent = await s.page.evaluate_handle(PARENT_GUARD, {
+                        'nodes': parent_nodes,
+                        'form': s.form,
+                        'scope': s.scope,
+                        'doc': s.document,
+                        'action': s.checkout_action or s.refs.get('submit'),
+                        'deadline': deadline,
+                        'submitAction': s.submit_action,
+                        'allowClick': False,
+                    })
+                base = fresh_parent or old
+                observed_parent=await s.page.evaluate_handle(PIN_OBSERVED,{'base':base,'scope':registry._scope,'originalScope':s.scope,
                     'action':action,'originalAction':s.refs['submit'],'factGuard':registry._guard,'deadline':deadline,
                     'sourceGuard':s.purchase_sources.guard if s.purchase_sources is not None else None,
                     'facts':[{'node':f.node,'snapshot':f.snapshot,'action':f.kind=='action'} for f in registry._facts.values()]})
+                fresh_parent = None
+                guard = observed_parent
+                if isinstance(old, CrossFrameLease):
+                    pin_cross_frame_guard = cast(
+                        Callable[..., Awaitable[Any]],
+                        getattr(self, "_pin_cross_frame_guard", None),
+                    )
+                    if not callable(pin_cross_frame_guard):
+                        raise FactRejected("invalid_binding")
+                    guard = await pin_cross_frame_guard(
+                        s, parent_guard=observed_parent, allow_click=True, deadline=deadline
+                    )
                 # Own the new lease before another await; preserve cancellation.
                 if not self._current(s):
                     await self._release_guard(guard)
@@ -191,6 +224,14 @@ class ObservedPurchaseMixin:
                 self._arm_deadline(s)
                 return await self._publish_purchase(s,SimpleNamespace(bot=self.bot))
             except (Exception,asyncio.CancelledError) as e:
+                if fresh_parent is not None:
+                    try:
+                        await fresh_parent.evaluate('g=>{g.revoked=true;}')
+                    except Exception:
+                        pass
+                    finally:
+                        try: await fresh_parent.dispose()
+                        except Exception: pass
                 if s.status not in {'cancelled','expired'}: s.status='rejected'
                 self._scrub_binding(s)
                 if isinstance(e,asyncio.CancelledError): raise

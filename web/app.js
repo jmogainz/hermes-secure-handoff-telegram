@@ -386,11 +386,12 @@
     const ids = new Set();
     const fieldIdPattern = /^f(?:[0-9]|1[0-9]|2[0-3])$/;
     const safeOption = value => typeof value === 'string' && value.length <= 128 && !/[\x00-\x1f\x7f]/.test(value);
-    const allowedFieldKeys = new Set(['id', 'label', 'type', 'required', 'autocomplete', 'inputMode', 'options', 'selectionMode']);
+    const allowedFieldKeys = new Set(['id', 'label', 'type', 'required', 'autocomplete', 'inputMode', 'options', 'selectionMode', 'frameOrdinal']);
     for (const field of request.fields) {
       if (!field || typeof field !== 'object' || Array.isArray(field) || Object.keys(field).some(key => !allowedFieldKeys.has(key)) || typeof field.id !== 'string' || !fieldIdPattern.test(field.id) || ids.has(field.id)) throw new RequestError('invalid');
       if (typeof field.label !== 'string' || !field.label.trim() || field.label.length > 80 || /[\x00-\x1f\x7f]/.test(field.label) || !FIELD_TYPES.has(field.type)) throw new RequestError('invalid');
       if (typeof field.required !== 'boolean') throw new RequestError('invalid');
+      if (field.frameOrdinal !== undefined && (!Number.isInteger(field.frameOrdinal) || field.frameOrdinal < 0 || field.frameOrdinal > 63)) throw new RequestError('invalid');
       if (field.autocomplete !== undefined && (typeof field.autocomplete !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(field.autocomplete))) throw new RequestError('invalid');
       if (field.inputMode !== undefined && !['text', 'numeric', 'decimal', 'tel', 'email'].includes(field.inputMode)) throw new RequestError('invalid');
       if (field.selectionMode !== undefined && field.selectionMode !== 'search') throw new RequestError('invalid');

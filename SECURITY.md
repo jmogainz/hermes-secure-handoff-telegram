@@ -31,12 +31,14 @@ general credential manager or payment processor.
   it in the Mini App, repository, chat, CLI arguments, or screenshots.
 - Never paste website credentials or one-time codes into Telegram chat, model
   prompts, terminals, logs, receipts, screenshots, or issue reports.
-- Top-document checkout fields are filled only after an encrypted v3 request
-  is accepted. Ordinary checkout remains fill-only. The observed-action path
-  permits one final click only after an owner-approved source lease, runtime-issued
-  facts, a fresh encrypted approval capability and synchronous exact-state checks.
-  Embedded/cross-frame publication remains blocked in v1.1. A field-free boolean
-  confirmation lacks bound transaction terms; field fill never authorizes payment.
+- Top-document and vetted HTTPS child-frame checkout fields are filled only after
+  an encrypted v3 request is accepted. Ordinary checkout remains fill-only. The
+  observed-action path permits one final click only after an owner-approved source
+  lease, runtime-issued facts, a fresh encrypted approval capability and synchronous
+  exact-state checks across the parent and every participating child frame. Child
+  ElementHandles never cross into a parent `page.evaluate`; each frame owns its
+  own private guard. A field-free boolean confirmation lacks bound transaction
+  terms; field fill never authorizes payment.
 - CAPTCHA, 3DS, MFA, passkeys, provider security screens, and payment outcomes
   remain user/provider-owned. The plugin never solves or bypasses them.
 - The Mini App uses standard iOS `autocomplete` metadata, but Apple Passwords
@@ -46,7 +48,8 @@ general credential manager or payment processor.
 ## Composed ENTRY candidate
 
 Composition exposes only opaque field refs, supported kind, required status and
-ordinal; no current values or arbitrary destination text. The agent may select
+ordinal; frame-aware checkout refs also carry a bounded numeric frame ordinal.
+There are no current values or arbitrary destination text. The agent may select
 optional fields and arrange finite headings/layouts but cannot omit required
 fields, inject values, or grant a purchase click. Generic field/option labels
 are runtime-owned. Original private browser mutation order is independent of
@@ -71,9 +74,21 @@ The approval launch fragment is public metadata, not encrypted summary delivery.
 Only submitted approval is encrypted. Runtime-issued capabilities bind sealed
 facts, warning version and original action; the model cannot provide selectors,
 values or an approval. Scope mutation/input/change epochs and final private state
-are checked synchronously before consuming and clicking. These checks do not
-certify merchant charges or legal completeness. Cancellation cannot undo a
-committed click. Synthetic integration is not a live deployment/security approval.
+are checked across all bound frames before consuming and clicking. There is no
+browser primitive for an atomic evaluate across OOPIFs, so the final parent
+dispatch has a deliberately short residual race window; a frame change detected
+before dispatch rejects, but the implementation does not claim mathematical
+atomicity. These checks do not certify merchant charges or legal completeness.
+Cancellation cannot undo a committed click. Synthetic integration is not a live
+deployment/security approval.
+
+Cross-origin HTTPS child frames are treated as merchant-selected members of the
+top-page checkout trust boundary after exact iframe-host containment and frame
+identity validation; the Mini App intentionally does not display or independently
+ask the owner to approve each child origin. Deployments whose threat model does
+not trust embedded processors must add an owner-visible child-origin policy or
+disable cross-frame purchase authority. HTTPS and DOM containment alone are not a
+universal provider-authority proof.
 
 ## Reporting
 

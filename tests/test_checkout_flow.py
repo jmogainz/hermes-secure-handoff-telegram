@@ -123,7 +123,7 @@ async def test_checkout_stops_for_native_transaction_review(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_embedded_checkout_is_rejected_without_publication(tmp_path):
+async def test_embedded_checkout_is_published_without_purchase(tmp_path):
     top_site, frame_site = start_demo(), start_demo()
     controller = await disposable_controller(tmp_path)
     controller.bot = Bot()
@@ -137,9 +137,11 @@ async def test_embedded_checkout_is_rejected_without_publication(tmp_path):
         frame = session.page.frames[-1]
         await frame.wait_for_load_state('domcontentloaded')
         result = await controller._snapshot(session)
-        assert result['status'] in {'unsupported_stage', 'publication_failed'}
-        assert session.request is None and session.key is None
-        assert not controller.bot.sent
+        assert result['status'] == 'waiting_for_handoff'
+        assert session.request is not None
+        assert session.request['mode'] == 'checkout'
+        assert any(frame is not session.page.main_frame for frame in session.field_frames.values())
+        assert controller.bot.sent
         assert await frame.locator('input[autocomplete="cc-number"]').input_value() == ''
         assert not await session.page.evaluate('window.clicks || 0')
     finally:

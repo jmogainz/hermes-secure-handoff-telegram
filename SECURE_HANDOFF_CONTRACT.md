@@ -20,7 +20,12 @@ Publication creates a fresh request ID and RSA key. Publication failure invalida
 
 ## Private binding and apply
 
-The controller pins exact top document, frame documents/origins, form/scope, action and control metadata. Generic and checkout controls do not get substituted with lookalikes. Limited auth rerender recovery checks the original document/origin and container/action before rebinding.
+The controller pins exact top document, frame documents/origins, iframe-host
+chain, form/scope, action and control metadata. Generic and checkout controls do
+not get substituted with lookalikes. Supported checkout child controls are
+mutated only through guards evaluated in their owning Frame; child handles are
+never passed to a parent-document evaluation. Limited auth rerender recovery
+checks the original document/origin and container/action before rebinding.
 
 On encrypted submit:
 
@@ -29,7 +34,7 @@ On encrypted submit:
 3. Validate original document/frame generations before any rebind or decryption.
 4. Decode strict bounded JSON and decrypt authenticated AES-GCM with request ID as AAD.
 5. Validate exact field IDs, string types, required values, checkbox vocabulary, typed formats and select membership.
-6. Recheck expiry and immutable private authority at the synchronous browser mutation boundary before each mutation/event and permitted auth action. Top-document controls only; cross-frame publication is blocked pending a reviewed parent/child commit protocol.
+6. Recheck expiry and immutable private authority at the synchronous browser mutation boundary before each mutation/event and permitted auth action. For a cross-frame checkout, revalidate every owning Frame/document/origin/iframe host and its child guard before each child mutation and immediately before the one parent action dispatch. This is conservative two-phase validation, not a browser-level atomic transaction across OOPIFs.
 7. Terminalize once, write only safe status/phase receipts, scrub key/request/bindings and wake the original conversation with status-only context.
 
 Cancellation marks the session unusable before waiting for in-flight work to release its lock. Requests are invalidated on cancel, replacement, idle timeout and request deadline. The command `/handoffcancel` cancels the actual secure controller as well as connection tests. Operator browser tabs survive.

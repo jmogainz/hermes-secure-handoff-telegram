@@ -144,15 +144,15 @@ async def test_replacement_iframe_cannot_inherit_request_authority(fixture):
     await frame.wait_for_load_state()
     await frame.set_content('<input autocomplete="cc-number">')
     first = await controller._snapshot(session)
-    assert first['status'] in {'publication_failed', 'unsupported_stage'}
-    assert session.request is None and session.key is None
+    assert first['status'] == 'waiting_for_handoff'
+    old_request = session.request
+    old_key = session.key
+    raw = encrypted(old_request, old_key, {'values': {'f0': 'SYNTHETIC-CARD'}})
     await frame.goto('https://other-processor.example/fields')
     await frame.set_content('<input autocomplete="cc-number">')
-    second = await controller._snapshot(session)
-    assert second['status'] != 'waiting_for_handoff'
-    assert session.request is None and session.key is None
+    await submit(controller, raw)
+    assert session.status == 'rejected'
     assert await frame.locator('input').input_value() == ''
-    assert not controller.bot.sent
 
 
 @pytest.mark.asyncio

@@ -12,12 +12,13 @@ try:
     from .handoff_adapters import PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
     from .config import DEFAULT_CDP_URL, validate_browser_cdp_url
     from .connection_check import load_runtime_config
+    from .frame_lease import CHILD_GUARD, PARENT_GUARD, CrossFrameLease, FrameEntry, FrameLeaseError
 except ImportError:  # Standalone Hermes plugin loader path.
     import composition
     from handoff_adapters import PAYMENT_KINDS, SUPPORTED_FIELD_TYPES, adapter_for_origin, adapter_for_url
     from config import DEFAULT_CDP_URL, validate_browser_cdp_url
     from connection_check import load_runtime_config
-
+    from frame_lease import CHILD_GUARD, PARENT_GUARD, CrossFrameLease, FrameEntry, FrameLeaseError
 TTL = 600
 IDLE_TTL = 1800
 MAX_SESSIONS = 4
@@ -39,6 +40,14 @@ SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REF_RE = re.compile(r"^r[0-9a-zA-Z_-]{1,32}$")
 _TARGET_ID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 _SAFE_OPTION_RE = re.compile(r"^[^\x00-\x1f\x7f]{0,128}$")
+
+class _FrameBindingError(ValueError):
+    """Internal frame rejection with a fixed public-safe reason."""
+
+    def __init__(self, reason="frame_unsupported"):
+        self.reason = reason if reason in {"frame_unsupported", "frame_stale"} else "frame_unsupported"
+        super().__init__(self.reason)
+
 
 class _AmbiguousTarget(ValueError):
     """Opaque target lookup failed; never serialize provider exception text."""
@@ -109,7 +118,7 @@ def _validate_v3_fields(fields: list[dict], mode: str) -> None:
     for field in fields:
         if not isinstance(field, dict):
             raise ValueError("invalid field")
-        if set(field) - {"id", "label", "type", "required", "autocomplete", "inputMode", "options", "selectionMode"}:
+        if set(field) - {"id", "label", "type", "required", "autocomplete", "inputMode", "options", "selectionMode", "frameOrdinal"}:
             raise ValueError("invalid field")
         field_id = field.get("id")
         label = field.get("label")
@@ -120,6 +129,9 @@ def _validate_v3_fields(fields: list[dict], mode: str) -> None:
             raise ValueError("invalid field label")
         if kind not in FIELD_TYPES or not isinstance(field.get("required"), bool):
             raise ValueError("invalid field type")
+        frame_ordinal = field.get("frameOrdinal")
+        if frame_ordinal is not None and (type(frame_ordinal) is not int or not 0 <= frame_ordinal <= 63):
+            raise ValueError("invalid frame ordinal")
         autocomplete = field.get("autocomplete")
         if autocomplete is not None and (
             not isinstance(autocomplete, str)
@@ -308,7 +320,12 @@ def decrypt_submission(raw: str, request: dict, key: Any) -> dict[str, Any]:
 
 @dataclass
 class Session:
-    user: int; chat: int; thread: int|None; page: Any = field(default=None, repr=False); context: Any = field(default=None, repr=False); request: dict|None = None; key: Any = field(default=None, repr=False); site: Any = field(default=None, repr=False); refs: dict[str, Any] = field(default_factory=dict, repr=False); ref_meta: dict[str, dict] = field(default_factory=dict, repr=False); field_parts: dict[str, list[Any]] = field(default_factory=dict, repr=False); field_frames: dict[str, Any] = field(default_factory=dict, repr=False); field_origins: dict[str, str] = field(default_factory=dict, repr=False); field_documents: dict[str, Any] = field(default_factory=dict, repr=False); auto_submit: bool = False; status: str = "open"; mode: str = "auth"; checkout_filled: bool = False; used_ids: set[str] = field(default_factory=set, repr=False); wake: asyncio.Event|None = field(default=None, repr=False); lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False); updated: float = field(default_factory=time.monotonic); document: Any = field(default=None, repr=False); form: Any = field(default=None, repr=False); scope: Any = field(default=None, repr=False); form_action: str = field(default="", repr=False); submit_action: str = field(default="", repr=False); provider: str = "generic"; stage: str = "browser_auth"
+    user: int; chat: int; thread: int|None; page: Any = field(default=None, repr=False); context: Any = field(default=None, repr=False); request: dict|None = None; key: Any = field(default=None, repr=False); site: Any = field(default=None, repr=False); refs: dict[str, Any] = field(default_factory=dict, repr=False); ref_meta: dict[str, dict] = field(default_factory=dict, repr=False); field_parts: dict[str, list[Any]] = field(default_factory=dict, repr=False); field_frames: dict[str, Any] = field(default_factory=dict, repr=False); field_origins: dict[str, str] = field(default_factory=dict, repr=False); field_documents: dict[str, Any] = field(default_factory=dict, repr=False)
+    field_hosts: dict[str, Any] = field(default_factory=dict, repr=False)
+    field_frame_ordinals: dict[str, int] = field(default_factory=dict, repr=False)
+    field_source_labels: dict[str, str] = field(default_factory=dict, repr=False)
+    cross_frame: bool = False
+    auto_submit: bool = False; status: str = "open"; mode: str = "auth"; checkout_filled: bool = False; used_ids: set[str] = field(default_factory=set, repr=False); wake: asyncio.Event|None = field(default=None, repr=False); lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False); updated: float = field(default_factory=time.monotonic); document: Any = field(default=None, repr=False); form: Any = field(default=None, repr=False); scope: Any = field(default=None, repr=False); form_action: str = field(default="", repr=False); submit_action: str = field(default="", repr=False); provider: str = "generic"; stage: str = "browser_auth"
 
     # Generic forms retain their exact native nodes; no same-looking rebind.
     form_controls: list[dict] = field(default_factory=list, repr=False)
@@ -620,10 +637,15 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         s.field_frames = {}
         s.field_origins = {}
         s.field_documents = {}
+        s.field_hosts = {}
+        s.field_frame_ordinals = {}
+        s.field_source_labels = {}
+        s.cross_frame = False
         s.form = None
         s.scope = None
         s.form_action = ""
         s.submit_action = ""
+        s.checkout_action = None
         s.auto_submit = False
 
     async def _select_option_metadata(self, element):
@@ -744,32 +766,195 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
             raise ValueError("checkout action origin mismatch")
         return action, form, scope, action_url, submit_action
 
+    async def _frame_host_in_scope(self, page, frame, scope, expected_host=None):
+        """Validate an iframe host chain without ever crossing a child handle."""
+        if frame == page.main_frame:
+            return True
+        parent = frame.parent_frame
+        if parent is None:
+            raise _FrameBindingError("frame_stale")
+        try:
+            host = await frame.frame_element()
+            if host is None:
+                raise _FrameBindingError("frame_stale")
+            if expected_host is not None:
+                same = await parent.evaluate("a => a[0] === a[1]", [host, expected_host])
+                if same is not True:
+                    raise _FrameBindingError("frame_stale")
+            while parent != page.main_frame:
+                valid = await parent.evaluate("""host => {
+                    if (!host || !host.isConnected || host.ownerDocument !== document || !host.getClientRects().length) return false;
+                    for (let n=host; n; n=n.parentElement) {
+                        const s=getComputedStyle(n);
+                        if (n.inert || n.hidden || n.getAttribute('aria-hidden')==='true' || s.display==='none' ||
+                            s.visibility !== 'visible' || Number(s.opacity) <= 0 || s.pointerEvents === 'none') return false;
+                    }
+                    return true;
+                }""", host)
+                if valid is not True:
+                    return False
+                host = await parent.frame_element()
+                if host is None:
+                    raise _FrameBindingError("frame_stale")
+                parent = parent.parent_frame
+                if parent is None:
+                    raise _FrameBindingError("frame_stale")
+            return await page.evaluate("""a => {
+                const [host, scope] = a;
+                if (!host || !scope || !host.isConnected || !scope.isConnected ||
+                    host.ownerDocument !== document || scope.ownerDocument !== document || !scope.contains(host) ||
+                    !host.getClientRects().length) return false;
+                for (let n=host; n; n=n.parentElement) {
+                    const s=getComputedStyle(n);
+                    if (n.inert || n.hidden || n.getAttribute('aria-hidden')==='true' || s.display==='none' ||
+                        s.visibility !== 'visible' || Number(s.opacity) <= 0 || s.pointerEvents === 'none') return false;
+                }
+                return true;
+            }""", [host, scope]) is True
+        except _FrameBindingError:
+            raise
+        except Exception:
+            raise _FrameBindingError("frame_stale") from None
+
+    async def _frame_host_contained(self, page, frame, scope):
+        """Check frame-host containment without treating hidden hosts as active."""
+        if frame == page.main_frame:
+            return True
+        parent = frame.parent_frame
+        if parent is None:
+            raise _FrameBindingError("frame_stale")
+        try:
+            host = await frame.frame_element()
+            if host is None:
+                raise _FrameBindingError("frame_stale")
+            while parent != page.main_frame:
+                if await parent.evaluate(
+                    "host => !!host && host.isConnected && host.ownerDocument === document", host
+                ) is not True:
+                    return False
+                host = await parent.frame_element()
+                if host is None:
+                    raise _FrameBindingError("frame_stale")
+                parent = parent.parent_frame
+                if parent is None:
+                    raise _FrameBindingError("frame_stale")
+            return await page.evaluate(
+                "a => !!a[0] && !!a[1] && a[0].isConnected && a[1].isConnected && "
+                "a[0].ownerDocument === document && a[1].ownerDocument === document && a[1].contains(a[0])",
+                [host, scope],
+            ) is True
+        except _FrameBindingError:
+            raise
+        except Exception:
+            raise _FrameBindingError("frame_stale") from None
+
+    async def _frame_has_visible_controls(self, frame):
+        controls = []
+        for locator in await frame.locator(
+            'input,textarea,select,button,[contenteditable],[role="textbox"],[role="combobox"],[role="checkbox"],[role="radio"],[role="slider"],[role="button"],[onclick],[tabindex]'
+        ).all():
+            try:
+                if await locator.is_visible():
+                    controls.append(locator)
+            except Exception:
+                continue
+        return controls
+
+    async def _validate_scope_iframes(self, scope):
+        """Reject hidden or detached iframe hosts in the exact active scope."""
+        scope_element = scope.as_element() if hasattr(scope, "as_element") else scope
+        if scope_element is None:
+            raise _FrameBindingError("frame_stale")
+        for iframe in await scope_element.query_selector_all("iframe"):
+            try:
+                if not await iframe.evaluate("""e => {
+                    if (!e.isConnected || !e.getClientRects().length) return false;
+                    for (let n=e; n; n=n.parentElement) {
+                        const s=getComputedStyle(n);
+                        if (n.inert || n.hidden || n.getAttribute('aria-hidden') === 'true' ||
+                            s.display === 'none' || s.visibility !== 'visible' || Number(s.opacity) <= 0 ||
+                            s.pointerEvents === 'none') return false;
+                    }
+                    return true;
+                }"""):
+                    raise _FrameBindingError("frame_unsupported")
+            except _FrameBindingError:
+                raise
+            except Exception:
+                raise _FrameBindingError("frame_stale") from None
+            finally:
+                try: await iframe.dispose()
+                except Exception: pass
+
     async def _bind_checkout(self, s):
         page = s.page
         was_filled = bool(getattr(s, "checkout_filled", False))
         adapter = adapter_for_url(page.url)
         action, form, scope, action_url, submit_action = await self._find_checkout_action(page, adapter)
         page_origin = _origin(page.url)
+        await self._validate_scope_iframes(scope)
         candidates = []
-        for frame in page.frames:
-            try:
-                frame_origin = page_origin if frame == page.main_frame else _origin(frame.url)
-            except Exception:
-                continue
-            if frame != page.main_frame and not frame_origin.startswith("https://"):
-                continue
-            for element in await frame.locator("input, textarea, select").all():
+        for frame_ordinal, frame in enumerate(page.frames):
+            if frame_ordinal > 63:
+                raise _FrameBindingError("frame_unsupported")
+            if frame == page.main_frame:
+                frame_origin = page_origin
+                frame_doc = await page.evaluate_handle("() => document")
+                frame_host = None
+                visible_controls = await self._frame_has_visible_controls(frame)
+            else:
                 try:
+                    frame_host = await frame.frame_element()
+                    if frame_host is None:
+                        raise _FrameBindingError("frame_stale")
+                    if not await self._frame_host_contained(page, frame, scope):
+                        continue
+                    if not await self._frame_host_in_scope(page, frame, scope, frame_host):
+                        raise _FrameBindingError("frame_unsupported")
+                    frame_origin = _origin(frame.url)
+                except _FrameBindingError:
+                    raise
+                except Exception:
+                    raise _FrameBindingError("frame_unsupported") from None
+                visible_controls = await self._frame_has_visible_controls(frame)
+                if not visible_controls:
+                    raise _FrameBindingError("frame_unsupported")
+                frame_doc = await frame.evaluate_handle("() => document")
+                custom_controls = [
+                    await control.evaluate(
+                        "e => !['INPUT','TEXTAREA','SELECT'].includes(e.tagName)"
+                    )
+                    for control in visible_controls
+                ]
+                if any(custom_controls):
+                    raise _FrameBindingError("frame_unsupported")
+            for element in visible_controls:
+                try:
+                    handle = await element.element_handle()
+                    if frame == page.main_frame and handle and await page.evaluate(
+                        "a => a[0] === a[1]", [handle, action]
+                    ) is True:
+                        continue
+                    if frame == page.main_frame and not await element.evaluate(
+                        "e => ['INPUT','TEXTAREA','SELECT'].includes(e.tagName)"
+                    ):
+                        if handle and await page.evaluate(
+                            "a => a[1].contains(a[0])", [handle, scope]
+                        ) is True:
+                            raise _FrameBindingError("frame_unsupported")
+                        continue
                     if not await self._usable_input(element):
+                        if frame != page.main_frame:
+                            raise _FrameBindingError("frame_unsupported")
                         continue
                     candidate = await self._control_metadata(element, frame, adapter)
                     if candidate is None:
-                        continue
-                    if frame != page.main_frame and candidate["kind"] not in PAYMENT_KINDS:
+                        if frame != page.main_frame:
+                            raise _FrameBindingError("frame_unsupported")
                         continue
                     handle = await element.element_handle()
                     if not handle:
-                        continue
+                        raise _FrameBindingError("frame_stale")
                     if frame == page.main_frame:
                         in_scope = await page.evaluate(
                             """a => {
@@ -782,20 +967,21 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         )
                         if in_scope is not True:
                             continue
-                    host = None if frame == page.main_frame else await frame.frame_element()
-                    if host is not None and not await page.evaluate("a => a[1].contains(a[0])", [host, scope]):
-                        continue
                     candidate.update({
                         "handle": handle,
                         "origin": frame_origin,
-                        "document": await frame.evaluate_handle("() => document"),
-                        "host": host,
+                        "document": frame_doc,
+                        "host": frame_host,
+                        "frameOrdinal": frame_ordinal,
                     })
                     candidates.append(candidate)
+                except _FrameBindingError:
+                    raise
                 except Exception:
                     continue
         if not candidates or len(candidates) > MAX_FIELDS:
             raise ValueError("checkout fields unavailable")
+
         semantic = " ".join(
             f"{candidate['label']} {candidate['metadata']['name']} {candidate['metadata']['aria']} {candidate['metadata']['placeholder']}"
             for candidate in candidates
@@ -814,48 +1000,72 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         s.scope = scope
         s.form_action = action_url
         s.submit_action = submit_action
+        s.checkout_action = action
         s.mode = "checkout"
         s.stage = "checkout_details"
         s.checkout_filled = was_filled
         s.refs["submit"] = action
+        s.cross_frame = any(candidate["frame"] != page.main_frame for candidate in candidates)
         for index, candidate in enumerate(candidates):
             field_id = f"f{index}"
+            public_label = candidate["label"]
+            if s.cross_frame:
+                public_label = candidate["kind"].replace("_", " ").replace("-", " ").title() + f" {index + 1}"
             metadata = {
-                "label": candidate["label"],
+                "label": public_label,
                 "type": candidate["kind"],
                 "required": bool(candidate["required"]),
             }
-            if candidate["autocomplete"] and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", candidate["autocomplete"]):
+            if s.cross_frame:
+                metadata["frameOrdinal"] = candidate["frameOrdinal"]
+            if not s.cross_frame and candidate["autocomplete"] and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", candidate["autocomplete"]):
                 metadata["autocomplete"] = candidate["autocomplete"]
-            if candidate["inputMode"] in {"text", "numeric", "decimal", "tel", "email"}:
+            if not s.cross_frame and candidate["inputMode"] in {"text", "numeric", "decimal", "tel", "email"}:
                 metadata["inputMode"] = candidate["inputMode"]
             if candidate["kind"] == "select":
                 if candidate["option_count"] > 64:
                     metadata["selectionMode"] = "search"
                 else:
-                    metadata["options"] = candidate["options"]
+                    metadata["options"] = [
+                        {"value": f"o{i}", "label": f"Option {i + 1}"}
+                        for i, _option in enumerate(candidate["options"])
+                    ]
             s.refs[field_id] = candidate["handle"]
             s.ref_meta[field_id] = metadata
             if candidate["kind"] == "select":
                 s.select_options[field_id] = list(candidate["all_options"])
+                if s.cross_frame and candidate["option_count"] <= 64:
+                    s.composition_options[field_id] = {
+                        f"o{i}": option["value"]
+                        for i, option in enumerate(candidate["all_options"])
+                    }
             s.field_parts[field_id] = [candidate["handle"]]
             s.field_frames[field_id] = candidate["frame"]
             s.field_origins[field_id] = candidate["origin"]
             s.field_documents[field_id] = candidate["document"]
-
+            s.field_hosts[field_id] = candidate["host"]
+            s.field_frame_ordinals[field_id] = candidate["frameOrdinal"]
+            s.field_source_labels[field_id] = candidate["label"]
+            s.form_controls.append({"handle": candidate["handle"], "metadata": candidate["metadata"],
+                                    "field": metadata, "select_options": candidate["all_options"],
+                                    "frame": candidate["frame"], "origin": candidate["origin"],
+                                    "document": candidate["document"], "host": candidate["host"],
+                                    "frameOrdinal": candidate["frameOrdinal"]})
     async def _collect_form_controls(self, page):
         """Read bounded native metadata only, never current values/checked state."""
         adapter = adapter_for_url(page.url)
         controls = []
         scope = form = None
         # Unsupported visible widgets must not silently disappear from a form.
-        selector = 'input, textarea, select, [contenteditable], [role=textbox], [role=combobox], [role=checkbox], [role=radio], [role=slider], iframe'
+        selector = 'input, textarea, select, [contenteditable], [role=textbox], [role=combobox], [role=checkbox], [role=radio], [role=slider], [role=button], [onclick], [tabindex], iframe'
         for locator in await page.locator(selector).all():
             if not await locator.is_visible():
                 continue
             tag = (await locator.evaluate("e => e.tagName")).lower()
             typ = (await locator.get_attribute("type") or "text").lower()
             if tag == "input" and typ in {"hidden", "button", "submit", "reset", "image"}:
+                continue
+            if tag == "button":
                 continue
             if not await self._usable_input(locator):
                 # Disabled/inert native controls are not user-editable; custom widgets fail closed.
@@ -911,6 +1121,7 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
         page = s.page
         origin = _origin(page.url)
         controls, form, scope = await self._collect_form_controls(page)
+        await self._validate_scope_iframes(scope)
         action = await page.evaluate("f => f.action", form) if form else page.url
         if _origin(action) != origin:
             raise ValueError("form action origin mismatch")
@@ -951,7 +1162,206 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 raise ValueError("ambiguous radio group")
         _validate_v3_fields([{"id": key, **meta} for key, meta in s.ref_meta.items()], "form")
 
+    async def _bind_composed_entry(self, s):
+        """Bind a composed fill-only scope that includes vetted child frames."""
+        await self._bind_checkout(s)
+        if not s.cross_frame:
+            raise ValueError("not a frame-aware composition")
+        # The checkout action remains privately pinned as checkout_action, but it
+        # is never a model-facing component or a fill slot in compose mode.
+        s.refs.pop("submit", None)
+        s.mode = "form"
+        s.stage = "general_form"
+        _validate_v3_fields([{"id": key, **meta} for key, meta in s.ref_meta.items()], "form")
+
+    async def _validate_frame_lease_entry(self, s, entry):
+        """Revalidate one private frame/document/host identity."""
+        self._assert_active(s)
+        frame = entry.frame
+        if frame == s.page.main_frame:
+            return
+        try:
+            if frame.is_detached() or s.page.frames[entry.ordinal] is not frame:
+                raise _FrameBindingError("frame_stale")
+            if _origin(frame.url) != entry.origin:
+                raise _FrameBindingError("frame_stale")
+            if await frame.evaluate("d => d === document", entry.document) is not True:
+                raise _FrameBindingError("frame_stale")
+            if await self._frame_host_in_scope(s.page, frame, s.scope, entry.host) is not True:
+                raise _FrameBindingError("frame_stale")
+        except _FrameBindingError:
+            raise
+        except Exception:
+            raise _FrameBindingError("frame_stale") from None
+
+    async def _pin_cross_frame_guard(self, s, *, parent_guard=None, allow_click=False, summary=None, deadline=None):
+        """Create a composite lease with frame-local native mutation guards."""
+        if deadline is None:
+            deadline = s.request["expiresAt"]
+        fields = [field_id for field_id in s.ref_meta if field_id.startswith("f")]
+        parent_nodes = []
+        parent_fields = {}
+        grouped = {}
+        index_map = {}
+        s.commit_slots = {}
+        global_index = 0
+        for field_id in fields:
+            parts = s.field_parts.get(field_id) or [s.refs[field_id]]
+            slots = []
+            for handle in parts:
+                frame = s.field_frames.get(field_id)
+                if frame is None:
+                    raise _FrameBindingError("frame_stale")
+                slots.append(global_index)
+                if frame == s.page.main_frame:
+                    parent_fields[global_index] = len(parent_nodes)
+                    parent_nodes.append(handle)
+                else:
+                    grouped.setdefault(frame, []).append((global_index, handle))
+                global_index += 1
+            s.commit_slots[field_id] = slots
+        if parent_guard is None:
+            action = getattr(s, "checkout_action", None) or s.refs.get("submit")
+            parent_guard = await s.page.evaluate_handle(PARENT_GUARD, {
+                "nodes": parent_nodes,
+                "form": s.form,
+                "scope": s.scope,
+                "doc": s.document,
+                "action": action,
+                "deadline": deadline,
+                "submitAction": s.submit_action,
+                "allowClick": allow_click,
+            })
+        entries = []
+        guards = []
+        try:
+            for frame, frame_fields in grouped.items():
+                if frame.is_detached() or frame not in s.page.frames:
+                    raise _FrameBindingError("frame_stale")
+                first_field = next(field_id for field_id in fields if s.field_frames.get(field_id) is frame)
+                document = s.field_documents[first_field]
+                origin = s.field_origins[first_field]
+                host = s.field_hosts[first_field]
+                local_nodes = [handle for _, handle in frame_fields]
+                guard = await frame.evaluate_handle(CHILD_GUARD, {
+                    "nodes": local_nodes,
+                    "doc": document,
+                    "origin": origin,
+                    "deadline": deadline,
+                })
+                guards.append(guard)
+                entry = FrameEntry(frame, document, origin, host, s.field_frame_ordinals[first_field], guard, frame_fields)
+                entries.append(entry)
+                for local_index, (index, _handle) in enumerate(frame_fields):
+                    index_map[index] = (guard, local_index)
+            async def validate_topology():
+                known = {entry.frame for entry in entries}
+                for frame in s.page.frames:
+                    if frame == s.page.main_frame or frame in known:
+                        continue
+                    try:
+                        host = await frame.frame_element()
+                        if host is None:
+                            continue
+                        if await self._frame_host_in_scope(s.page, frame, s.scope, host) is True:
+                            raise _FrameBindingError("frame_stale")
+                    except _FrameBindingError:
+                        raise
+                    except Exception:
+                        # A frame that cannot be classified is not safe to
+                        # ignore if it appeared under the bound checkout.
+                        raise FrameLeaseError("frame_stale") from None
+            lease = CrossFrameLease(
+                parent_guard=parent_guard,
+                parent_fields=parent_fields,
+                frames=entries,
+                index_map=index_map,
+                validate_frame=lambda entry: self._validate_frame_lease_entry(s, entry),
+                validate_topology=validate_topology,
+                deadline=deadline,
+                allow_click=allow_click,
+                summary=summary,
+            )
+            await lease.check_all()
+            return lease
+        except BaseException:
+            for guard in guards:
+                try:
+                    await guard.evaluate("g => {g.revoked=true;}")
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        await guard.dispose()
+                    except Exception:
+                        pass
+            if parent_guard is not None and parent_guard is not getattr(s, "commit_guard", None):
+                try:
+                    await parent_guard.evaluate("g => {g.revoked=true;}")
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        await parent_guard.dispose()
+                    except Exception:
+                        pass
+            raise
+    async def _preflight_frame_form(self, s):
+        """Private preflight for a top checkout scope with child native controls."""
+        if s.mode != "form" or not s.request or s.request.get("mode") != "form" or "submit" in s.refs:
+            raise ValueError("invalid frame form mode")
+        if s.request["expiresAt"] < int(time.time() * 1000) or _origin(s.page.url) != s.request["origin"]:
+            raise _FrameBindingError("frame_stale")
+        if await s.page.evaluate("d => d === document", s.document) is not True:
+            raise _FrameBindingError("frame_stale")
+        if not s.form or not s.scope:
+            raise _FrameBindingError("frame_stale")
+        if await s.page.evaluate("f => f.ownerDocument === document && f.isConnected", s.form) is not True:
+            raise _FrameBindingError("frame_stale")
+        if await s.page.evaluate("e => e.ownerDocument === document && e.isConnected", s.scope) is not True:
+            raise _FrameBindingError("frame_stale")
+        action = await s.page.evaluate("f => f.action", s.form)
+        if action != s.form_action or _origin(action) != s.request["origin"]:
+            raise _FrameBindingError("frame_stale")
+        expected = s.composition_fields if s.requested_mode == "compose" else [{"id": key, **meta} for key, meta in s.ref_meta.items()]
+        if s.request["fields"] != expected:
+            raise _FrameBindingError("frame_stale")
+        checked_frames = set()
+        adapter = adapter_for_url(s.page.url)
+        for control in s.form_controls:
+            frame = control["frame"]
+            if frame != s.page.main_frame:
+                marker = id(frame)
+                if marker not in checked_frames:
+                    await self._validate_frame_lease_entry(s, SimpleNamespace(
+                        frame=frame, ordinal=control["frameOrdinal"], origin=control["origin"],
+                        document=control["document"], host=control["host"],
+                    ))
+                    checked_frames.add(marker)
+                if await frame.evaluate(
+                    "a => a[0].isConnected && a[0].ownerDocument === a[1]",
+                    [control["handle"], control["document"]],
+                ) is not True:
+                    raise _FrameBindingError("frame_stale")
+            else:
+                if await s.page.evaluate(
+                    "a => a[0].isConnected && a[0].ownerDocument === a[1] && a[2].contains(a[0])",
+                    [control["handle"], s.document, s.scope],
+                ) is not True:
+                    raise _FrameBindingError("frame_stale")
+            live = await self._control_metadata(control["handle"], frame, adapter)
+            if live is None or live["metadata"] != control["metadata"] or live["kind"] != control["field"]["type"]:
+                raise _FrameBindingError("frame_stale")
+            if bool(live["required"]) != bool(control["field"]["required"]):
+                raise _FrameBindingError("frame_stale")
+            if control.get("select_options") != live.get("all_options"):
+                raise _FrameBindingError("frame_stale")
+        if s.commit_guard is not None:
+            await s.commit_guard.evaluate("g => g.check()")
+
     async def _preflight_form(self, s):
+        if getattr(s, "cross_frame", False):
+            return await self._preflight_frame_form(s)
         if s.mode != "form" or s.request.get("mode") != "form" or "submit" in s.refs:
             raise ValueError("invalid form mode")
         if s.request["expiresAt"] < int(time.time()*1000) or _origin(s.page.url) != s.request["origin"]:
@@ -1167,8 +1577,22 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 s.component_ref = None
                 s.composition_snapshot = None
                 try:
-                    await self._bind_form(s)
+                    try:
+                        await self._bind_form(s)
+                    except Exception:
+                        # A composed checkout may have native controls in vetted
+                        # HTTPS child frames.  Keep the ordinary top-document
+                        # binder unchanged and use the frame path only here.
+                        self._reset_binding(s)
+                        await self._bind_composed_entry(s)
                     fields, refs, bindings, options = composition.project(s.ref_meta)
+                    if s.cross_frame:
+                        for field_id, private_options in s.select_options.items():
+                            if field_id in options:
+                                options[field_id] = {
+                                    f"o{i}": option["value"]
+                                    for i, option in enumerate(private_options)
+                                }
                     s.composition_fields = fields
                     s.composition_refs = bindings
                     s.composition_options = options
@@ -1495,24 +1919,27 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                 if not await self._usable_input(e): raise ValueError
                 if s.mode == "checkout":
                     live = await self._control_metadata(e, frame, adapter_for_url(s.page.url))
-                    if live is None or live["kind"] != f["type"] or live["label"] != f["label"] or bool(live["required"]) != f["required"]:
+                    expected_label = s.field_source_labels.get(field_id, f["label"])
+                    if live is None or live["kind"] != f["type"] or live["label"] != expected_label or bool(live["required"]) != f["required"]:
                         raise ValueError("changed checkout metadata")
                     if f.get("selectionMode") == "search":
                         pinned = s.select_options.get(field_id)
                         if live["option_count"] is None or live["option_count"] <= 64 or pinned is None or live["all_options"] != pinned:
                             raise ValueError("changed checkout options")
-                    elif f["type"] == "select" and (live["option_count"] != len(f.get("options", [])) or live["options"] != f.get("options")):
-                        raise ValueError("changed checkout options")
+                    elif f["type"] == "select":
+                        expected_options = s.select_options.get(field_id) if s.cross_frame else f.get("options", [])
+                        if live["option_count"] != len(expected_options or []) or live["options"] != expected_options:
+                            raise ValueError("changed checkout options")
         e=s.refs.get("submit")
         if e is None and s.auto_submit: return
         if not e or not await e.is_visible() or not await e.is_enabled() or not await self._related_submit(s.page,s.form,s.scope,e): raise ValueError
         if await s.page.evaluate("a => !a[0].formAction || a[0].formAction === a[1]",[e,s.submit_action]) is not True: raise ValueError
     async def _pin_commit_guard(self, s):
         """One private browser lease; never expose its nodes or option mappings."""
-        # Cross-frame commits cannot atomically validate the parent authority.
-        # Until that protocol exists, require a top-document stage/remint.
         if any(frame != s.page.main_frame for frame in s.field_frames.values()):
-            raise ValueError("cross-frame commit unsupported")
+            s.cross_frame = True
+            s.commit_guard = await self._pin_cross_frame_guard(s)
+            return
         nodes, slots = [], {}
         for field_id in s.ref_meta:
             if not field_id.startswith("f"): continue
@@ -1742,7 +2169,12 @@ class SecureHandoffController(PurchaseAcquisitionMixin, ObservedPurchaseMixin):
                         if s.request["expiresAt"]<int(time.time()*1000): raise ValueError
                         if s.mode == "form": await self._preflight_form(s)
                         value = self._resolve_search_select_value(s, field, payload[field["id"]])
-                        if s.requested_mode == "compose" and field["type"] == "select":
+                        if field["type"] == "select" and s.cross_frame and field.get("selectionMode") != "search":
+                            mapping = s.composition_options.get(field["id"])
+                            if not isinstance(mapping, dict) or value not in mapping:
+                                raise ValueError("unknown select option")
+                            value = mapping[value]
+                        elif s.requested_mode == "compose" and field["type"] == "select":
                             value = s.composition_options[field["id"]][value]
                         await self._fill_bound_field(s,field,value)
                     if s.request["expiresAt"]<int(time.time()*1000): raise ValueError

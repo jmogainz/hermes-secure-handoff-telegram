@@ -13,7 +13,10 @@ transaction terms are part of this ENTRY API.
    Result: `{status: "attached", session_ref}`.
 2. Call `{action: "discover_components", session_ref}`. Result:
    `{status: "composition_available", snapshot_ref, expires_at_ms,
-   phase: "entry", refs: [{ref, kind, required, ordinal}, ...]}`.
+   phase: "entry", refs: [{ref, kind, required, ordinal}, ...]}`. When a
+   checkout includes supported native controls in HTTPS child frames, each ref
+   also includes a bounded `frameOrdinal`; it is only a layout/binding hint and
+   never identifies or exposes the child origin.
 3. Call `{action: "present_composition", snapshot_ref, layout, groups}`.
    `layout` is `stack` or `sections`. Each group is exactly
    `{title, refs: [field_ref, ...]}`. Titles are the runtime-owned labels
@@ -96,15 +99,27 @@ same browser are outside this tool's confidentiality boundary.
 
 Top-document native text, email, telephone, number, password, OTP, textarea,
 search, URL, date/time/local datetime/month/week, supported card-like typed
-fields, bounded single selects and radio groups (rendered as selects). The
-existing generic form binder must identify one unambiguous native scope.
+fields, bounded single selects and radio groups (rendered as selects). For
+checkout/composed entry, the same native control set may be discovered in a
+visible HTTPS child frame descended from the exact checkout scope. The private
+binding retains the owning Frame, full document URL, document handle and iframe
+host chain; child handles are mutated only inside that Frame.
 
 Checkboxes, color and range are rejected in this composition version because
 their existing native renderer has a default state rather than genuinely empty
 entry. Large search-selects (over 64 choices), file inputs, custom widgets,
-iframes and multiple/ambiguous scopes also fail closed. Unsupported controls
-cannot be hidden to force acceptance. Legacy non-composed form compatibility
-is unchanged. No universal website compatibility claim.
+general forms remain top-document only; HTTP/invisible frames, custom widgets,
+shadow controls, browser dialogs and multiple/ambiguous scopes also fail closed.
+Unsupported controls cannot be hidden to force acceptance. Legacy non-composed
+form compatibility is unchanged. No universal website compatibility claim.
+
+Cross-frame checkout entry and observed approval use a separate guard per
+owning document. The final parent action is a conservative two-phase sequence:
+all child frames are checked immediately before the parent click, the capability
+is consumed before dispatch, and any detected navigation, host replacement,
+mutation epoch or expiry rejects. OOPIFs do not expose a truly atomic browser
+primitive, so a narrow last-moment race cannot be eliminated or represented as
+atomic authorization. Ambiguous dispatch is never retried.
 
 ## Explicit purchase-source continuation
 

@@ -5,7 +5,7 @@
 - Added explicit encrypted fill-only general forms, native typed controls, checkbox and radio-as-select.
 - Polished the mobile-first monochrome UI, destination/action hierarchy, field errors, accessible focus and touch sizing.
 - Kept generic checkout and legacy boolean confirmations fill-only, while adding a separate source-authorized observed-action candidate: agent-selected runtime refs, fresh review, encrypted **Complete purchase** approval, and one synchronous guarded action with truthful `purchase_submitted`/`outcome_unknown` outcomes.
-- Blocked embedded/cross-frame field publication pending atomic parent/child authorization; top-document checkout remains supported.
+- Enabled provider-neutral embedded/cross-frame checkout entry for visible native controls in vetted HTTPS child frames, with per-frame guards and a conservative non-atomic OOPIF approval boundary; custom/provider challenge widgets remain unsupported.
 - Blocked direct model type/click and raw page-text output from the handoff tool.
 - Added original-document/frame binding, cancellation/expiry lifecycle, stricter JSON/choice/URL validation and publication budget regressions.
 - Scoped checkout discovery to the sole visible billing dialog, filtered unsafe multi-token autocomplete metadata, and added private exact-label handling for native selects with 65–512 enabled choices so long country/state lists stay within the public launch budget.

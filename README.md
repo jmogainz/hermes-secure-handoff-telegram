@@ -38,8 +38,10 @@ Telegram bot + Hermes gateway
 The current source adds `attach` with `mode: "compose"`, opaque field discovery,
 `present_composition`, and component status/cancellation. The agent chooses
 optional fields, visual order, finite group headings and stack/section layouts;
-required fields cannot be omitted. Inputs start empty. This is encrypted
-**ENTRY only**, not completed remote purchase support. See the exact
+required fields cannot be omitted. Inputs start empty. Supported native payment
+controls may live in vetted HTTPS child frames; the agent receives only bounded
+frame ordinals, never frame URLs or selectors. This is encrypted **ENTRY only**,
+not completed remote purchase support. See the exact
 [composition API and limits](docs/composition.md).
 
 A separate local observed-action candidate now integrates real public-fact
@@ -71,7 +73,9 @@ The controller can publish a bounded stage containing typed `identifier`, `passw
 
 ### Checkout
 
-The controller recognizes a generic checkout shape from visible semantic fields and a single exact payment action such as `Buy`, `Pay`, `Purchase`, `Place order`, or `Complete purchase`. Version 1.1 supports top-document controls only. Embedded/cross-frame payment publication is blocked until atomic parent/child authorization is established.
+The controller recognizes a generic checkout shape from visible semantic fields and a single exact payment action such as `Buy`, `Pay`, `Purchase`, `Place order`, or `Complete purchase`. Version 1.1 supports visible native controls in the exact checkout scope, including controls in HTTPS child frames. Each frame is privately pinned by object identity, origin, document and iframe-host chain; the Mini App sees only generic kinds, required status, ordinal and a bounded frame ordinal.
+
+The frame path does not support HTTP/invisible frames, custom widgets, shadow controls, browser dialogs, or provider challenges. Browsers provide no truly atomic JavaScript transaction spanning out-of-process cross-origin frames, so the final parent action uses a conservative two-phase lease: every frame is revalidated immediately before the parent click, the capability is consumed before dispatch, mutations invalidate it, and ambiguous dispatch is never retried. This is not proof of universal checkout compatibility or payment success; live provider/3DS behavior remains a separate gate.
 
 The flow is deliberately two-step:
 

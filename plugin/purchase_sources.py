@@ -6,14 +6,18 @@ privacy or financial truth. Private/control exclusions remain enforced. Without
 owner authorization, purchase-source discovery fails closed.
 
 Supported checkout grammar: one schema.org Product/name, table th/td or dl
- dt/dd money rows, native labeled entry controls, one explicit purchase button.
-Unrecognized visible copy (including known estimates/renewals/extra obligations)
-blocks rather than being dropped. Neither page text nor labels cross discovery.
+dt/dd money rows, native labeled entry controls (including already-bound native
+payment controls in vetted HTTPS child frames), and one explicit purchase
+button. Unrecognized visible copy (including known estimates/renewals/extra
+obligations) blocks rather than being dropped. Neither page text nor labels
+cross discovery.
 """
 import asyncio
 import re
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, cast
 try:
     from .purchase_facts import PurchaseFactRegistry, FactRejected, _LEAF, _mint, _origin
 except ImportError:
@@ -121,7 +125,7 @@ CHECKOUT = r"""scope => {
         if(!n.textContent.trim() || !visible(e) || e.closest('script,style,input,textarea,select,option')) continue;
         if(![...allowed].some(a=>a===e||a.contains(e))) throw Error('unsupported copy');
     }
-    if(scope.querySelector('iframe,[contenteditable],[role=dialog]') || records.length>23) throw Error('shape');
+    if(scope.querySelector('[contenteditable],[role=dialog]') || records.length>23) throw Error('shape');
     return records;
 }""".replace('LEAF_FUNCTION', _LEAF)
 
@@ -151,23 +155,36 @@ class CatalogGrant:
 
     async def close(self):
         self.closed=True
-        self.checkout_page.remove_listener('framenavigated',self.checkout_navigation)
-        try: await self.guard.evaluate('g=>g.close()')
-        except Exception: pass
-        for handle in (self.guard,self.scope):
-            try: await handle.dispose()
+        try:
+            self.checkout_page.remove_listener('framenavigated',self.checkout_navigation)
+        except Exception:
+            pass
+        guard: Any = self.guard
+        self.guard = None
+        scope: Any = self.scope
+        self.scope = None
+        if guard is not None:
+            try:
+                await guard.evaluate('g=>g.close()')
+            except Exception:
+                pass
+            finally:
+                try: await guard.dispose()
+                except Exception: pass
+        if scope is not None:
+            try: await scope.dispose()
             except Exception: pass
 
 
 class PurchaseSourceLease:
-    def __init__(self, s, grant):
+    def __init__(self, s, grant, frame_validator=None):
         self.session=s; self.owner=(s.user,s.chat,s.thread); self.page=s.page; self.context=s.context
-        self.grant=grant; self.revision=_mint('ps_'); self.deadline=min(grant.deadline,time.monotonic()+120)
+        self.grant=grant; self.frame_validator=frame_validator; self.revision=_mint('ps_'); self.deadline=min(grant.deadline,time.monotonic()+120)
         self.records={}; self.guard=None; self.closed=False; self.armed=False
 
     @classmethod
-    async def create(cls, s, grant):
-        self=cls(s,grant)
+    async def create(cls, s, grant, frame_validator=None):
+        self=cls(s,grant,frame_validator)
         try:
             await grant.check(s)
             root=await s.page.query_selector('body')
@@ -200,6 +217,16 @@ class PurchaseSourceLease:
     async def validate(self,s):
         if self.closed or time.monotonic()>=self.deadline or s is not self.session or self.owner!=(s.user,s.chat,s.thread) or self.page is not s.page or self.context is not s.context:
             raise FactRejected('expired_revision')
+        if self.frame_validator is not None:
+            await self.frame_validator(s)
+        if getattr(s, "commit_guard", None) is not None:
+            try:
+                if await s.commit_guard.evaluate("g=>g.check()") is not True:
+                    raise FactRejected('changed_binding')
+            except FactRejected:
+                raise
+            except Exception:
+                raise FactRejected('changed_binding') from None
         await self.grant.check(s)
         for r in self.records.values():
             guard=self.grant.guard if r['kind']=='public_catalog_item' else self.guard
@@ -235,12 +262,24 @@ class PurchaseSourceLease:
 
     async def close(self):
         self.closed=True
-        if self.guard:
-            try: await self.guard.evaluate('g=>g.close()'); await self.guard.dispose()
-            except Exception: pass
-        for record in self.records.values():
-            try: await record['node'].dispose()
-            except Exception: pass
+        guard, self.guard = self.guard, None
+        if guard is not None:
+            try:
+                await guard.evaluate('g=>g.close()')
+            except Exception:
+                pass
+            finally:
+                try:
+                    await guard.dispose()
+                except Exception:
+                    pass
+        for record in list(self.records.values()):
+            node: Any = record.get('node')
+            if node is not None:
+                try:
+                    await node.dispose()
+                except Exception:
+                    pass
         self.records.clear()
 
 
@@ -400,6 +439,46 @@ class PurchaseAcquisitionMixin:
                 if scope: await scope.dispose()
                 raise
 
+    async def _validate_purchase_source_frames(self, s):
+        """Keep source leases aligned with the already-bound checkout frames."""
+        if not getattr(s, "cross_frame", False):
+            return
+        host_in_scope = cast(
+            Callable[..., Awaitable[Any]], getattr(self, "_frame_host_in_scope", None)
+        )
+        validate_frame = cast(
+            Callable[..., Awaitable[Any]], getattr(self, "_validate_frame_lease_entry", None)
+        )
+        if not callable(host_in_scope) or not callable(validate_frame):
+            raise FactRejected('source_binding_unsupported')
+        bound = {}
+        for field_id, frame in s.field_frames.items():
+            if field_id.startswith("f") and frame != s.page.main_frame:
+                bound.setdefault(frame, field_id)
+        for frame in s.page.frames:
+            if frame == s.page.main_frame:
+                continue
+            try:
+                host = await frame.frame_element()
+                if host is None:
+                    raise FactRejected('source_binding_unsupported')
+                if await host_in_scope(s.page, frame, s.scope, host) is not True:
+                    continue
+                field_id = bound.get(frame)
+                if field_id is None:
+                    raise FactRejected('source_binding_unsupported')
+                await validate_frame(s, SimpleNamespace(
+                    frame=frame,
+                    ordinal=s.field_frame_ordinals[field_id],
+                    origin=s.field_origins[field_id],
+                    document=s.field_documents[field_id],
+                    host=s.field_hosts[field_id],
+                ))
+            except FactRejected:
+                raise
+            except Exception:
+                raise FactRejected('source_binding_unsupported') from None
+
     async def _purchase_sources(self,action,args,ident):
         if not valid_payload(action,args): return {'status':'invalid'}
         s=self.sessions.get(ident)
@@ -414,7 +493,9 @@ class PurchaseAcquisitionMixin:
                     if s.purchase_factory is not None: return {'status':'rejected'}
                     if len(s.catalog_grants)!=1: return {'status':'blocked','reason':'public_source_authorization_required'}
                     if s.purchase_sources is not None: await s.purchase_sources.close(); s.purchase_sources=None
-                    lease=await PurchaseSourceLease.create(s,s.catalog_grants[0])
+                    lease=await PurchaseSourceLease.create(
+                        s, s.catalog_grants[0], frame_validator=self._validate_purchase_source_frames
+                    )
                     s.purchase_sources=lease
                     self._assert_active(s)
                     return lease.projection()

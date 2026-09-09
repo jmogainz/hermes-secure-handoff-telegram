@@ -90,14 +90,18 @@ only. These fixtures are not live Telegram, phone or provider proof.
   plain visible `itemprop="name"` leaf, no native forms/inputs or iframe. The
   owner selects the source; neither the grant nor markup certifies privacy.
 - One top-document native checkout form containing one matching Product/name.
+  Its payment controls may be visible native inputs in the already-bound HTTPS
+  child frames; the public product/fact grammar remains top-document-only and
+  no child-frame text is published.
 - Money rows use `table/tr/th/td` or `dl/dt/dd`, exact English labels `Total`,
   `Subtotal`, `Tax`, `Fee`, `Discount`, and exact ISO-prefixed numeric leaf tokens
   supported by `PurchaseFactRegistry`. Roles are unique; currencies must agree.
   If subtotal is supplied, integer minor-unit arithmetic must reconcile all rows.
 - One original native submit button with exact supported purchase copy. No
   Submit/Continue inference. Same-origin action routing is privately pinned.
-- Native entry controls supported by composed entry. Field labels stay private;
-  labels containing known material financial qualifiers block acquisition.
+- Native entry controls supported by composed entry, including visible native
+  controls in vetted HTTPS child frames. Field labels stay private; labels
+  containing known material financial qualifiers block acquisition.
 - Other visible text outside recognized summary/entry/action nodes blocks, even
   outside the checkout form. This deliberately rejects ordinary sites containing
   unrelated navigation, banners or unsupported legal copy instead of dropping it.

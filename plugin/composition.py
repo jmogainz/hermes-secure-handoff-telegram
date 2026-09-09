@@ -42,17 +42,26 @@ def valid_payload(action, payload):
 
 def project(metadata):
     fields, refs, bindings, options = [], [], {}, {}
+    frame_aware = any(isinstance(meta.get('frameOrdinal'), int) for meta in metadata.values())
     for index, (field_id, meta) in enumerate(metadata.items()):
         if meta['type'] not in KINDS or meta.get('selectionMode') == 'search':
             raise ValueError('unsupported composition control')
         field = {'id':field_id, 'type':meta['type'], 'required':meta['required'],
                  'label':meta['type'].replace('_',' ').replace('-',' ').title() + ' ' + str(index+1)}
+        if frame_aware:
+            ordinal = meta.get('frameOrdinal')
+            if type(ordinal) is not int or not 0 <= ordinal <= 63:
+                raise ValueError('invalid frame ordinal')
+            field['frameOrdinal'] = ordinal
         if meta['type'] == 'select':
             options[field_id] = {f'o{i}':o['value'] for i,o in enumerate(meta['options'])}
             field['options'] = [{'value':f'o{i}', 'label':f'Option {i+1}'} for i in range(len(meta['options']))]
         ref=mint('fr_')
         bindings[ref]=field_id
-        refs.append({'ref':ref,'kind':meta['type'],'required':meta['required'],'ordinal':index+1})
+        descriptor={'ref':ref,'kind':meta['type'],'required':meta['required'],'ordinal':index+1}
+        if frame_aware:
+            descriptor['frameOrdinal'] = meta['frameOrdinal']
+        refs.append(descriptor)
         fields.append(field)
     return fields, refs, bindings, options
 
