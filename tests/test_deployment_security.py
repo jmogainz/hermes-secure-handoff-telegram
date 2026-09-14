@@ -5,15 +5,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_general_form_release_versions_are_coherent():
+def test_transport_only_release_versions_are_coherent():
     import tomllib
     import yaml
     from plugin import __version__
     from scripts.release_check import VERSION
-    expected = "1.1.0"
+    expected = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert isinstance(expected, str) and expected.strip()
     assert __version__ == expected
     assert VERSION == expected
-    assert tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"] == expected
     assert json.loads((ROOT / "package.json").read_text())["version"] == expected
     lock = json.loads((ROOT / "package-lock.json").read_text())
     assert lock["version"] == lock["packages"][""]["version"] == expected
@@ -36,9 +36,9 @@ def test_sensitive_entry_host_has_defense_in_depth_headers():
         assert directive in csp
 
 
-def test_all_frontend_and_real_sdk_checks_run_in_ci():
+def test_compact_frontend_and_real_sdk_checks_run_in_ci():
     package = json.loads((ROOT / "package.json").read_text())
-    assert "npm run test:general" in package["scripts"]["test"]
-    assert package["scripts"]["test:general"] == "node tests/frontend-general.test.mjs"
+    assert package["scripts"]["test"] == "npm run test:frontend"
+    assert package["scripts"]["test:frontend"] == "node tests/frontend.test.mjs"
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     assert "npm run test:qa-real-sdk" in workflow

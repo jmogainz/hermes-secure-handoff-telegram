@@ -3,7 +3,7 @@
 from .connection_check import register as register_connection_check
 from .secure_handoff import register as register_secure_handoff
 
-__version__ = "1.1.0"
+__version__ = "2.1.0"
 
 
 def register(ctx):

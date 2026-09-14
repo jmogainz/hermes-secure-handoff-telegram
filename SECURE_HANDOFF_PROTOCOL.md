@@ -1,118 +1,247 @@
-# Hermes Secure Handoff Telegram protocol
+# Secure Handoff Protocol v4
 
-## Request lifecycle
+## Overview
 
-```text
-fresh HTTPS browser page
-  -> semantic stage scan
-  -> exact target/frame/document binding
-  -> v3 Mini App request with public metadata only
-  -> user enters values through Telegram's Mini App
-  -> local AES-GCM encryption + RSA-OAEP key wrapping
-  -> Telegram WebApp.sendData()
-  -> owner/chat/thread/request validation
-  -> live preflight
-  -> decrypt immediately before browser mutation
-  -> fill exact controls
-  -> rebind and preflight again
-  -> next stage or terminal status
+Protocol v4 is an owner-scoped encrypted transport plus a generic browser executor. Browser interpretation is deliberately outside the protocol.
+
+Telegram callbacks normally must match the publishing owner, private chat, and topic exactly. Telegram may omit the topic ID from a Web App service message. In that case, the request ID must resolve to exactly one live flow for the same owner and private chat; zero or duplicate matches reject without consuming or executing any flow.
+
+## Tool actions
+
+### `attach`
+
+Input:
+
+```json
+{"action":"attach","origin":"https://example.com","ref":"<optional exact 32-hex target id>"}
 ```
 
-`open` is for a fresh navigation. `attach` and `present` republish a live stage without navigation. A request ID and private key are single-use. A new stage always receives a new ID/key.
+Behavior:
 
-## Public v3 shape
+- attaches to an existing HTTPS page without navigation;
+- uses the exact target ID when supplied;
+- rejects ambiguous origin-only attachment;
+- returns a fresh opaque `session_ref` that identifies this flow;
+- performs no form or stage discovery.
+
+Every action after `attach` requires that returned `session_ref`. Multiple flows
+may use the same owner/chat/topic, but each flow must have a different exact
+browser target. A target lease is never shared or replaced.
+
+### `inventory`
+
+Input:
+
+```json
+{"action":"inventory","session_ref":"ss_..."}
+```
+
+Output contains generic controls only:
 
 ```json
 {
-  "v": 3,
-  "id": "sh_<opaque-id>",
-  "publicKey": {"kty":"RSA","n":"<base64url>","e":"AQAB"},
-  "expiresAt": 0,
-  "origin": "https://target.example",
-  "provider": "generic",
-  "stage": "checkout_details",
-  "mode": "checkout",
-  "actionLabel": "Review purchase",
-  "fields": [
+  "status":"inventory_available",
+  "snapshot_ref":"sn_...",
+  "refs":[
     {
-      "id": "f0",
-      "label": "Card number",
-      "type": "card_number",
-      "required": true,
-      "autocomplete": "cc-number",
-      "inputMode": "numeric"
+      "ref":"fr_...",
+      "category":"editable",
+      "capabilities":["keyboard","fill"],
+      "frame_origin":"https://example.com",
+      "frame_ordinal":0,
+      "ordinal":1,
+      "visible":true,
+      "enabled":true,
+      "editable":true
     }
-  ],
-  "demo": false
+  ]
 }
 ```
 
-The controller bounds request size, field count, labels, options, IDs, action labels, TTL, and origin. It publishes semantic metadata rather than selectors, HTML, query strings, or current values.
+No selector, value, HTML, full URL, cookie, or storage data is returned.
 
-## Field vocabulary
+### `present_entry`
 
-- `text`, `email`, `tel`, and `number` cover ordinary form controls.
-- `password` and `otp` cover authentication secrets and one-time codes.
-- `card_number`, `card_expiry`, and `cvc` cover supported payment inputs.
-- `select` covers native option lists. Up to 64 enabled choices are published as a normal picker; larger lists up to 512 enabled choices use `selectionMode: "search"`, where the user types the exact visible option label and the browser-side value mapping stays private.
-- `textarea`, `checkbox`, `date`, `time`, `datetime-local`, `month`, `week`, `url`, `search`, `color` and `range` extend native generic forms. Radio groups use one `select` with opaque choice IDs.
+Input:
 
-## Generic form state machine
-
-`mode: "form"`, `stage: "general_form"`, `actionLabel: "Fill fields"` uses the same encrypted values envelope. Every value is a string; checkbox values are exactly `"true"` or `"false"`. A required checkbox must be true. Normal select values must occur in published options, including empty values. A large native select uses `selectionMode: "search"` and is resolved against a private, immutable option map by normalized exact label; duplicate labels fail closed. The controller binds one exact native form or form-less scope, fills its supported controls without a submit/click/Enter action, then returns `filled`. Current values/defaults and large-select option values are never published. Unsupported/ambiguous controls and changed node identities fail closed. Website-owned input/change handlers can still run.
-
-Bounds: 24 logical fields, 64 published select options, 512 private enabled options for exact-label selects, 512 characters per value, 2048 UTF-8 plaintext bytes, 4096 envelope bytes. Source min/max/step/pattern constraints are not part of this wire revision.
-
-A browser adapter can classify these types from standard control semantics: `autocomplete`, `name`, `id`, accessible label, placeholder, input mode, and native input type. The core has no named-site selectors or provider branches.
-
-## Authentication state machine
-
-```text
-auth stage visible
-  -> waiting_for_handoff
-  -> encrypted values accepted
-  -> exact controls filled
-  -> stage rebind
-  -> next auth stage published with a fresh ID/key
-  -> submitted or authenticated state verified separately
+```json
+{
+  "action":"present_entry",
+  "session_ref":"ss_...",
+  "snapshot_ref":"sn_...",
+  "fields":[
+    {
+      "ref":"fr_...",
+      "label":"Account identifier",
+      "type":"text",
+      "required":true,
+      "strategy":"keyboard"
+    }
+  ]
+}
 ```
 
-The controller prefers visible secret stages over leftover identifier fields, rejects disabled/inert/readonly/hidden controls, and can group bounded split OTP controls as one logical `otp` field. Auto-submit OTP stages do not invent a submit button.
+The browser ref remains private. The public Mini App request receives a generated field ID and the supplied UI metadata.
 
-## Checkout state machine
+Each field may include a strictly validated `component`. Version 2.1 installs `segmented_code`, a required 4–12 character digits-only or ASCII-alphanumeric control. A field may also include `binding: {"mode":"split_chars","refs":[...]}`. The primary ref receives character zero and each additional exact ref receives the next character. The controller caps the entire entry plan at 24 browser operations.
 
-```text
-checkout_details visible
-  -> waiting_for_handoff
-  -> encrypted registrant/billing/payment values accepted
-  -> exact controls filled, no purchase click
-  -> ordinary checkout: scrub key/request/bindings -> human_action_required -> user completes in provider page
-  -> source-authorized observed checkout: fresh runtime fact review -> encrypted Complete purchase approval
-  -> exact original action/document/scope revalidated synchronously -> one guarded native click
-  -> purchase_submitted or outcome_unknown -> provider result verified separately
+`present_entry` may include a `secure-handoff.ui/1` data-only `view`. Its root is `stack`; nested node kinds are `stack`, `row`, `section`, `text`, `divider`, and `field`. Every field must appear exactly once. The plugin rewrites private refs to generated field IDs before publication. See [docs/components.md](docs/components.md).
+
+### `present_action`
+
+Input:
+
+```json
+{
+  "action":"present_action",
+  "session_ref":"ss_...",
+  "snapshot_ref":"sn_...",
+  "action_ref":"ar_...",
+  "summary":"Perform the selected browser action"
+}
 ```
 
-Checkout detection requires a single exact payment action plus payment semantics, supported payment fields, or a bounded multi-field billing shape. The action must stay in the same top-level origin and approved scope. Version 1.1 publishes visible native controls from the top document and vetted HTTPS child frames descended from that scope. Child controls are represented by opaque refs plus a bounded frame ordinal; frame URLs, selectors, labels and values remain private. A same-looking replacement form, iframe host or payment document never inherits old authority. Because browsers do not provide an atomic JavaScript operation across OOPIFs, observed purchase approval uses a short conservative parent/child two-phase lease and explicitly retains a residual last-moment race boundary rather than claiming atomicity.
-Cross-origin child processors are treated as merchant-selected members of the top-page trust boundary; HTTPS is an eligibility gate, not an independent child-origin approval. The Mini App does not expose child URLs. Environments requiring separate processor approval must add that policy or disable cross-frame purchase authority.
+This publishes a separate explicit approval request. Approval authorizes one attempt on that exact private ref. There is no selector rebinding and no retry after dispatch uncertainty.
 
-Authentication stages use the same private frame/document/origin/iframe-host binding when a provider renders native identifier/password or OTP controls in one visible eligible HTTPS child frame, including a form-less staged surface. The public manifest remains generic and frame URLs stay private. A single explicit `Sign in`/`Log in` action may be guarded in the owning frame. When up to four eligible auth actions are visible, field handoff still proceeds; after encrypted fill the controller returns `action_selection_required` with only a bounded count, and a later owner-selected ordinal is revalidated against the private action/frame/form lease before one click. A single ambiguous `Continue`, `Next` or `Submit` remains fill-only unless the owner explicitly opts into that exact continuation on `open`/`attach`; multiple actions never cause a guessed click. `Verify` is accepted only for OTP stages. This action selector cannot authorize checkout.
+### `read`
 
-The plugin never solves CAPTCHA, performs 3DS, chooses MFA/passkey options, or claims provider payment success. Legacy `payment_confirmation` is blocked in both frontend and controller. The observed-action path is limited to an explicitly source-authorized, runtime-bound checkout and one user-approved original action; `confirm: true` alone is not enough. `purchase_submitted` is an action receipt, not payment or ownership proof, and ambiguous dispatch becomes `outcome_unknown` without retry.
+Input:
 
-## Encryption
+```json
+{"action":"read","session_ref":"ss_..."}
+```
 
-For v3 requests, the Mini App encrypts `{"values":{...}}`. The old field-free `{"confirm":true}` shape remains parseable for compatibility but is not an enabled purchase capability. The Mini App generates a fresh AES-GCM key and IV, wraps the raw AES key with the request RSA public key, authenticates the request ID as additional data, clears form controls and plaintext byte buffers, then calls Telegram `sendData()`. Public launch metadata is validated but not digitally signed; trusted hosting/Telegram delivery is part of the threat model.
+Returns that flow's safe status. For completed execution, the result is mechanical evidence only:
 
-The plugin checks the outer envelope against the live request, unwraps the AES key, authenticates the ciphertext, checks exact field IDs and value limits, and rejects every extra property. It holds plaintext only for the immediate Playwright fill/select call.
+```json
+{
+  "status":"execution_complete",
+  "request_kind":"entry",
+  "operations_requested":1,
+  "browser_calls_returned":1,
+  "browser_errors":0,
+  "browser_error_categories":[]
+}
+```
 
-## Origin and identity
+### `close`
 
-The browser origin in the request must be HTTPS and free of credentials, query strings, and fragments. The owner identity is the exact tuple `(Telegram user, private chat, thread)`. The bound page, document handle, form/scope, submit action, child frame, and document generation are checked again before every mutation.
+Input:
 
-## iOS autofill boundary
+```json
+{"action":"close","session_ref":"ss_..."}
+```
 
-The Mini App uses semantic autocomplete metadata so Telegram's iOS WebView can offer platform keyboard, OTP, Passwords, and payment suggestions. Apple associates saved credentials and payment autofill with the Mini App origin. A target origin in metadata cannot cause Apple to surface that target site's saved credentials on a shared Mini App origin. This behavior is device/WebView/version dependent and is not treated as a protocol guarantee.
+Closes that flow's controller state and releases private refs. It does not close the browser page.
 
-## Safe records
+## Public Mini App request
 
-Receipts contain only protocol version, opaque request ID, status, originating thread, timestamp, and phase names. Wakeups contain only status and target origin. No field labels that contain values, decrypted values, ciphertext, keys, cookies, storage, exception text, or provider account data are written to logs or chat.
+Entry request:
+
+```json
+{
+  "v":4,
+  "id":"sh_...",
+  "kind":"entry",
+  "origin":"https://example.com",
+  "expiresAt":0,
+  "publicKey":{"kty":"RSA","n":"...","e":"AQAB"},
+  "fields":[
+    {
+      "id":"f0",
+      "label":"Verification code",
+      "type":"tel",
+      "required":true,
+      "strategy":"keyboard",
+      "component":{
+        "kind":"segmented_code",
+        "length":6,
+        "alphabet":"digits"
+      }
+    }
+  ],
+  "view":{
+    "schema":"secure-handoff.ui/1",
+    "kind":"stack",
+    "children":[{"kind":"field","field":"f0"}]
+  }
+}
+```
+
+Action approval request:
+
+```json
+{
+  "v":4,
+  "id":"sh_...",
+  "kind":"action_approval",
+  "origin":"https://example.com",
+  "expiresAt":0,
+  "publicKey":{"kty":"RSA","n":"...","e":"AQAB"},
+  "approvalNonce":"approve_...",
+  "summary":"Perform the selected browser action"
+}
+```
+
+## Encrypted submission
+
+Outer envelope:
+
+```json
+{
+  "v":4,
+  "id":"sh_...",
+  "wrappedKey":"...",
+  "iv":"...",
+  "ciphertext":"..."
+}
+```
+
+Cryptography:
+
+- fresh AES-256-GCM key per submission;
+- 96-bit IV;
+- plaintext encrypted with request ID as AAD;
+- AES key wrapped with request RSA-2048 public key using OAEP SHA-256;
+- strict JSON parsing rejects duplicate keys, unknown members, invalid constants, malformed base64url, and oversized payloads.
+
+Entry plaintext:
+
+```json
+{"values":{"f0":"<user-entered value>"}}
+```
+
+Action plaintext:
+
+```json
+{"approve":"approve_..."}
+```
+
+## Execution semantics
+
+Once transport validation succeeds:
+
+1. consume the request ID;
+2. decrypt immediately before execution;
+3. attempt each exact operation once with a 10-second per-operation timeout and a 24-operation request cap;
+4. continue entry operations after bounded browser exceptions;
+5. record only requested/returned/error counts and safe categories;
+6. scrub plaintext, key material, request, and private control refs;
+7. send a status-only acknowledgement and wakeup;
+8. let Goku inspect the live browser.
+
+The executor never performs value readback, validity checks, provider-stage inference, mutation-epoch checks, navigation-success inference, or automatic submit discovery. It never selects or clicks a continuation control during entry. Any applied keyboard, fill, selection, or check operation may activate destination handlers, including submission or navigation, so Goku must inspect the live result.
+
+## Safe error categories
+
+Only these browser-execution categories are exposed:
+
+- `detached`
+- `timeout`
+- `browser_error`
+
+Raw exception text is private and discarded.
+
+## Rejection boundary
+
+`rejected` is allowed only before execution starts for transport or authorization failures. Website behavior after execution starts is never converted into `rejected` and is never labeled success or failure by the plugin.

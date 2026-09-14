@@ -1,28 +1,33 @@
 # Changelog
 
-## 1.1.0 — release candidate
+## 2.1.0 — agent-composed component views
 
-- Added explicit encrypted fill-only general forms, native typed controls, checkbox and radio-as-select.
-- Polished the mobile-first monochrome UI, destination/action hierarchy, field errors, accessible focus and touch sizing.
-- Kept generic checkout and legacy boolean confirmations fill-only, while adding a separate source-authorized observed-action candidate: agent-selected runtime refs, fresh review, encrypted **Complete purchase** approval, and one synchronous guarded action with truthful `purchase_submitted`/`outcome_unknown` outcomes.
-- Enabled provider-neutral embedded/cross-frame checkout entry for visible native controls in vetted HTTPS child frames, with per-frame guards and a conservative non-atomic OOPIF approval boundary; custom/provider challenge widgets remain unsupported.
-- Extended provider-neutral auth discovery to form-less staged controls in one visible vetted HTTPS child frame, including multi-token autocomplete and extended CTA phrases; multiple eligible actions publish/fill fields first and require a bounded owner-selected ordinal with fresh exact-action revalidation.
-- Blocked direct model type/click and raw page-text output from the handoff tool.
-- Added original-document/frame binding, cancellation/expiry lifecycle, stricter JSON/choice/URL validation and publication budget regressions.
-- Scoped checkout discovery to the sole visible billing dialog, filtered unsafe multi-token autocomplete metadata, and added private exact-label handling for native selects with 65–512 enabled choices so long country/state lists stay within the public launch budget.
-- Wired `/handoffcancel` to the secure controller as well as diagnostic requests.
-- Added static hosting no-store/no-referrer/CSP/permissions protections.
-- Test browsers are disposable; development never changes the operator's live Chrome profile or uses real credentials.
+- Added a safe component registry with a required 4–12 character `segmented_code` control.
+- Added the versioned `secure-handoff.ui/1` layout tree with `stack`, `row`, `section`, `text`, `divider`, and `field` nodes.
+- Required every entry field to appear exactly once and rewrote private browser refs to generated field IDs before publication.
+- Added explicit `split_chars` fan-out so one encrypted value can map mechanically to several exact controls.
+- Rejected unknown UI versions, nodes, keys, components, refs, URI-bearing text, and Unicode format or invisible characters.
+- Preserved exact segmented input with no silent stripping, truncation, case changes, or bridge-origin OTP autofill.
+- Added live expiry timers, page-restoration checks, plaintext clearing on freeze/page hide, a 24-operation cap, and 10-second per-operation timeouts.
+- Cancelled in-flight WebCrypto submissions on cancel, expiry, page hide, and freeze, with freshness checks after every asynchronous boundary.
+- Aligned frontend/backend limits by Unicode code point and UTF-8 byte count, rejected duplicate JSON keys on both sides, and removed native input truncation.
+- Serialized close, reattach, inventory, publication, and browser execution lifecycles; execution wakeups now use immutable receipt metadata.
+- Tightened the public tool schema with action-specific requirements, exact field variants, and a closed recursive view-node union.
+- Clarified that the plugin does not select submit during entry, while any applied input, selection, or check may activate destination handlers.
+
+## 2.0.0 — transport-only executor
+
+- Replaced the auth/form/checkout policy engine with protocol v4: exact target attachment, generic control inventory, agent-composed encrypted entry, and separate one-shot action approval.
+- Removed deterministic form/provider classification, mutation epochs, stage inference, post-fill validation, automatic action discovery, purchase observers, and webpage-success verdicts.
+- `execution_complete` now means only that an authorized submission was accepted and all exact browser operations were attempted once. Website outcome is always inspected by Goku afterward.
+- Retained encryption, exact owner/chat/topic scope, expiry, replay prevention, loopback CDP, opaque exact refs, secret cleanup, and explicit consequential-action authorization.
+- Rewrote the Mini App as a compact v1 diagnostic plus v4 encrypted entry/action client.
+- Removed obsolete policy modules, fixtures, and provider/purchase-specific tests.
+
+## 1.1.0 — superseded candidate
+
+- Developed staged field/action lifecycle and cross-frame guards. Never released as proof of universal live-provider compatibility.
 
 ## 1.0.0 — prototype
 
-- Renamed the product to Hermes Secure Handoff Telegram.
-- Added v3 typed authentication and checkout handoffs.
-- Added registrant, billing, card number, expiration, CVC, select, email, phone, password, and OTP field support.
-- Added native HTTPS child-frame binding for supported payment fields.
-- Added a fresh field-free confirmation request before any bound purchase action.
-- Added standard iOS keyboard, OTP, Passwords, and payment autofill metadata.
-- Removed named-site adapter behavior and kept the browser controller provider-neutral.
-- Added loopback-only CDP validation, one-owner-per-profile enforcement, and status-only receipts/wakeups.
-
-Earlier prototype history is preserved in the source history and protocol contracts, not as a supported public API.
+- Initial encrypted Telegram Mini App and browser handoff prototype.

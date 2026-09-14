@@ -1,73 +1,54 @@
-# Compatibility and safety boundaries
+# Compatibility
 
-Version 1.1.0 expands encrypted entry, not the authority to submit arbitrary forms.
-The protocol is v1 for connection diagnostics and v3 for secure handoff. v2 is rejected.
+## Supported contract
 
-## Composed ENTRY candidate
+Version 2.1 uses protocol v4 for secure entry and action approval. The connection diagnostic remains protocol v1. Protocol v4 now accepts the versioned `secure-handoff.ui/1` layout tree while keeping legacy flat field lists valid.
 
-`mode: compose` adds agent-selected optional fields and bounded grouping/order
-with stack/sections layouts; required fields must remain visible. Supported
-native fields start empty. Color/range/checkbox defaults and large search-selects
-are not supported in this path; legacy form support below is unchanged.
-See [the complete composition contract](composition.md). Real disposable browser
-and frontend crypto/controller roundtrips cover both layouts; no live install or
-physical phone verification is implied. A separate local observed-action path now
-integrates real registry → controller tools → Mini App → encrypted approval → one
-guarded click. The private [acquisition bridge](purchase-acquisition.md) now
-supports explicitly selected source refs and composed-entry continuation for
-restricted table/definition-list checkout shapes. An exact owner-selected public
-catalog document is still required via `discover_catalog_sources` and
-`request_source_approval`; ordinary attach/composition cannot infer that grant.
-The encrypted source-selection approval is not privacy or financial certification
-and grants no purchase authority. See [the API and remaining prerequisites](observed-purchase-status.md).
+The controller attaches to one existing HTTPS page in the configured loopback Chrome CDP context and inventories generic controls across the top document and reachable child frames.
 
-## Supported shapes
+Structural support:
 
-| Shape | Behavior | Verification |
-|---|---|---|
-| Identifier, password, combined login | Exact positively classified stage; encrypted fill and bound continuation | Synthetic real Chromium + Mini App/controller round trip |
-| Embedded auth stage | Visible native auth controls in one vetted HTTPS child frame, including form-less staged surfaces; private frame/document/origin/host binding; multiple eligible actions publish fields first and require a bounded owner ordinal after fill | Synthetic separate-origin auth fill/click, form-less Apple-shaped staged flow, and fill-only regressions |
-| Split OTP, including no-button auto-submit | One logical secret mapped privately to digit nodes | Synthetic staged browser fixtures |
-| General native form or one form-less scope | Explicit `mode: form`, encrypted fill only | Synthetic real Chromium, typed-control and stale-node regressions |
-| Text, email, phone, number, password, OTP, textarea | Bounded string values | Python + frontend contract tests |
-| Checkbox | Encrypted `"true"` or `"false"`; required checkbox must be true | Python + frontend tests |
-| Native single select | Exact published choices, including empty only if published; lists with 65–512 enabled choices use private exact-label search entry | Python + frontend contract tests |
-| Radio group | One logical select with opaque choice IDs; no guessed default | Browser fixture + same wire select renderer |
-| Date, time, local datetime, month, week, URL, search, color, range | Native controls and bounded values | Synthetic Chromium; physical iPhone behavior not verified |
-| Checkout details | Encrypted fill for visible native controls in the exact top-document checkout scope, including vetted HTTPS child frames; ordinary checkout terminates at `human_action_required`; explicitly source-authorized observed checkout may publish a separate encrypted approval for one guarded click | Real separate-origin Chromium entry and observed-action fixtures; live providers not established |
-| Exact existing Chrome tab | `attach` with origin and target ID in `ref`, no navigation | Real disposable CDP target and mock ambiguity regressions |
-| React auth input replacement | Same original form/document/action node and full semantic manifest | Narrow same-form fixture; whole form/action replacement requires remint |
-| Cancel / timeout / teardown | Invalidates request and prevents later replay; preserves operator tabs | Concurrency, expiry, cleanup regressions |
+- native text-like `input` and `textarea` controls;
+- native `select` controls by exact visible option label;
+- checkbox and radio controls;
+- `contenteditable` controls;
+- ARIA textbox/searchbox/combobox controls through keyboard delivery;
+- focusable custom widgets through agent-selected keyboard delivery;
+- buttons, links, and ARIA buttons through separate owner-approved action requests.
+- one-value segmented code controls with exact 4–12 character validation;
+- agent-composed `stack`, `row`, `section`, `text`, `divider`, and `field` layouts;
+- optional mechanical `split_chars` fan-out from one segmented value to exact inventoried controls.
 
-## Deliberate limits
+Strategies:
 
-- Generic Submit/Continue/Next remain fill-only by default, even with username/current-password autofill hints. A single ambiguous continuation can use explicit owner opt-in on the exact `open`/`attach` call, consumed during binding and never applicable to checkout. When up to four eligible auth actions are visible, the controller does not guess: it publishes/fills the fields, returns `action_selection_required` with a count only, and accepts one owner-selected ordinal through `select_auth_action` after exact frame/document/action revalidation. `Verify` is only auth-classified for OTP stages.
+- `keyboard` — focus, select existing content, then type key events;
+- `fill` — Playwright fill call;
+- `select` — exact option-label selection;
+- `check` — explicit true/false checked state;
+- `click` — action approval only.
 
-- No arbitrary JavaScript, CSS selectors, plaintext field values or click commands from the model-facing handoff tool. Legacy `type`/`click` return forbidden; `read` is status/origin only.
-- General form binding is top-document only. Multiple candidate scopes, file inputs, multi-select, contenteditable, custom ARIA widgets and ambiguous groups are rejected. Shadow roots, nested/cross-origin general forms and native browser dialogs are not promised.
-- Auth binding may inspect one visible, structurally contained HTTPS child frame for native identifier/password/OTP controls, including a form-less staged provider surface. The private lease keeps the top-page scope plus child frame/document/origin/iframe-host identity; child action clicks run only in that owning frame. Up to four private eligible auth actions can be retained without exposing labels; fields are filled first and a later owner ordinal selects one exact action. Multiple eligible auth frames, HTTP/invisible frames, custom/shadow controls and unsupported provider challenges fail closed.
-- HTTPS child-frame checkout controls are supported only when the iframe host is a visible descendant of the exact original checkout scope and the frame exposes visible editable native `input`, `textarea`, or `select` controls with a supported semantic kind. Non-rendered helper iframe hosts are ignored as inactive, but becoming visible after binding trips the parent mutation epoch and fails closed. The private lease pins frame object ordinal, full frame URL/document, origin and iframe-host chain; document/navigation/host replacement, A→B→A epochs, HTTP frames, custom widgets, shadow controls and ambiguous frames fail closed. No old request transfers to a replacement frame or document.
-- Cross-origin browser frames do not provide one atomic JavaScript evaluation across OOPIFs. The observed purchase lease checks every child guard immediately before the parent action, consumes before dispatch and never retries an ambiguous dispatch. A narrow last-moment race between the final child check and parent click cannot be eliminated by this browser primitive and is explicitly not claimed away; provider-specific payment/3DS verification remains separate.
-- Up to 24 logical fields, 64 published choices per normal select, 512 enabled choices per private exact-label select, 512 characters per value, 2048 UTF-8 plaintext bytes and 4096 envelope bytes. Large selects must have unique labels after Unicode/whitespace normalization; lists over 512 or ambiguous labels fail closed. The browser-side option values are never published in the Telegram URL.
-- The current wire does not carry arbitrary source min/max/step/pattern constraints. Range is supported only for the Mini App's default 0–100 integer domain; incompatible source ranges fail closed. Source constraints and complex calendars remain a compatibility limit, not a universal-form claim.
-- Filling can trigger the site's own input/change handlers, autosave or automatic submission. The plugin does not explicitly click submit in form/checkout mode, but cannot sandbox hostile destination JavaScript.
-- Ordinary checkout and legacy field-free payment confirmations do not execute payments. The observed-action candidate can dispatch one exact guarded click only after an owner source-selection grant, runtime-issued refs, fresh review, and encrypted **Complete purchase** approval. `purchase_submitted` is not proof of payment or ownership; `outcome_unknown` is never retried.
-- CAPTCHA, passkeys, native wallets, MFA/3DS challenges, consent, account-security enrollment and purchase approval remain human-owned.
-- iOS autofill attributes are present, but passwords belong to the Mini App origin; this is not a cross-origin password-manager bridge. Physical iPhone, keyboard, WebKit and live Telegram client behavior require human verification.
+## Deliberate non-guarantees
 
-## Operational status
+No deterministic executor can prove compatibility with every custom widget, virtualized control, canvas UI, shadow-DOM component, provider event model, or mid-execution rerender. Protocol v4 handles that uncertainty by refusing to make a webpage verdict: it finishes the mechanical attempt, wakes Goku, and requires live inspection.
 
-`waiting_for_handoff` means Telegram accepted publication, not that a particular client rendered it.
-`filled` means encrypted general fields were applied without an explicit submit click.
-`submitted` means an auth-stage action was applied, not that the provider authenticated.
-`human_action_required` means the final transaction must be reviewed/completed in the provider page.
-After checkout fill, `read` can include `public_fact_source_unavailable` (no
-trusted public source) or `purchase_binding_unsupported` (reviewed source/binding
-rejected). These are bounded diagnostics, not retry or purchase capabilities.
-See [observed purchase status](observed-purchase-status.md).
-`unsupported_stage` can mean ambiguous target or rejected binding; it does not prove expiry or an unloaded plugin.
-`unavailable` with `session_missing` means attach is needed, not necessarily a restart.
+The data-only layout tree can compose new views at runtime, but it cannot add executable widget behavior. Passkeys, CAPTCHAs, OS dialogs, file pickers, custom canvas input, and unsupported browser operations stay user-operated until an audited executor release adds them. The Mini App never loads request-supplied code.
 
-## Privacy and trust
+The plugin does not select or click submit after entry. Any applied keyboard, fill, selection, or check operation may activate destination handlers, including submission or navigation. That is provider behavior, not an implicit plugin action or proof of success.
 
-No real account, password, card, billing data or OTP is a test fixture. Tests use disposable browsers and intercepted/synthetic sites, not the operator's live profile. Hosting JavaScript, the Telegram SDK, the local gateway/CDP endpoint and destination website remain distinct trust boundaries. Browser/JavaScript strings cannot be guaranteed zeroized; cleanup is best effort, with references and byte buffers cleared where possible.
+A detached node, timeout, or browser exception does not become a provider rejection. It appears only as a safe mechanical error count/category. Goku may inspect, choose another strategy or fresh ref, and discuss a retry with Jacob.
+
+## Cross-frame behavior
+
+Each opaque ref points to the exact inventoried element handle in its owning frame. Frame origins are exposed without path/query/fragment data. The plugin does not automatically substitute a same-looking element after replacement. A stale handle produces a mechanical error; Goku decides what to do next.
+
+## Status meanings
+
+- `attached` — exact page held.
+- `inventory_available` — generic refs minted.
+- `waiting_for_handoff` — Mini App publication call returned successfully.
+- `execution_complete` — valid callback accepted and every operation attempted once.
+- `publication_failed` — Telegram publication call failed.
+- `expired`, `cancelled`, `closed`, `unavailable` — controller lifecycle states.
+- `rejected` — pre-execution transport or authorization refusal only.
+
+None of these statuses proves website acceptance, provider authentication, or transaction completion.

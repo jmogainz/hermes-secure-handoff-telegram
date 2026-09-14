@@ -1,50 +1,115 @@
-# Secure Handoff Contract — v1.1
+# Secure Handoff Contract — Transport-Only v4
 
-## Product boundary
+## Purpose
 
-Hermes Secure Handoff Telegram is an encrypted human-entry bridge with a separately gated, owner-approved observed checkout action. The operator owns one Telegram DM and one dedicated local Chrome profile. The Mini App renders one bounded request; the gateway decrypts only at private apply time. No passwords, OTPs, payment details, field values, cookies, raw DOM or decrypted payloads belong in model tools, logs, receipts, screenshots or memory.
+Secure Handoff moves user-entered sensitive values from a Telegram Mini App into exact browser controls without exposing those values to the model, chat, logs, receipts, or public request metadata.
 
-## Modes
+The plugin is a **transport and mechanical executor**. It is not a webpage interpreter.
 
-- **v1 connection check:** a fixed synthetic phrase tests RSA-OAEP/Telegram delivery. No credentials.
-- **v3 auth:** one positively classified identifier/password/OTP stage. A bound auth action may be executed only after the human sends the encrypted stage. Split OTP can rely on the site's own final-digit action.
-- **v3 form:** explicit `mode: form`, action label `Fill fields`. General encrypted entry only. No Submit, Save, Delete, Pay or Enter action is executed by the controller.
-- **v3 checkout:** supported billing/payment fields are filled. Ordinary checkout then becomes `human_action_required`; an explicitly source-authorized observed checkout can instead receive a fresh review and separate encrypted approval for one guarded action.
-- **Legacy v3 payment_confirmation:** recognized for safe rejection/compatibility only. The frontend cannot send it and the controller cannot execute a purchase. An origin plus `confirm: true` is insufficient transaction consent. Observed approval requires runtime-issued facts, explicit source authorization, a fresh user-visible review and an exact one-shot capability.
+## Responsibilities
 
-## Ownership and publication
+The plugin owns only:
 
-Only an explicitly configured positive Telegram owner ID in its private DM can call the tool. Callback owner/chat/thread must match the request; omissions and mismatches do not relax scope. `open` starts a fresh navigation. `attach` binds an existing exact HTTPS origin plus optional 32-hex Chrome target ID in `ref`; ambiguous same-origin pages are not guessed. `present` binds/publishes without navigation. A missing session is reported distinctly from an ambiguous target or rejected binding.
+- encrypted Mini App requests and submissions;
+- exact Telegram owner and private-chat binding, plus exact topic binding when Telegram supplies it; a topicless Web App service callback is routed by a unique request ID within that owner/chat scope;
+- request expiry, one-time use, and replay protection;
+- exact attachment to one existing HTTPS Chrome target and a unique per-flow `session_ref`;
+- short-lived opaque control refs produced by generic inventory;
+- mechanical execution of the exact agent-selected operation strategy;
+- separate, explicit, one-time owner approval for a consequential action;
+- secret and private-handle cleanup;
+- status-only acknowledgements, receipts, and wakeups.
 
-Publication creates a fresh request ID and RSA key. Publication failure invalidates the request and key. Only bounded public metadata and the public key appear in the launch fragment; no current field values are copied. Telegram acceptance is not proof the phone displayed the keyboard.
+The plugin does **not** decide:
 
-## Private binding and apply
+- what kind of website or form is open;
+- whether a field is an identifier, password, OTP, billing field, or provider stage;
+- whether an input value “stuck” or passed site validation;
+- whether a page rerender, route change, or button state is good or bad;
+- whether authentication, registration, checkout, payment, or another workflow succeeded;
+- what the next browser step should be.
 
-The controller pins exact top document, frame documents/origins, iframe-host
-chain, form/scope, action and control metadata. Generic and checkout controls do
-not get substituted with lookalikes. Supported checkout child controls are
-mutated only through guards evaluated in their owning Frame; child handles are
-never passed to a parent-document evaluation. Limited auth rerender recovery
-checks the original document/origin and container/action before rebinding.
+Those judgments belong to Goku after inspecting the exact live browser, followed by discussion with Jacob when a decision or authorization is needed.
 
-On encrypted submit:
+## State flow
 
-1. Consume the native `sh_` request namespace before model dispatch, including late/unknown valid IDs.
-2. Check exact callback identity and one-time request state under the session lock.
-3. Validate original document/frame generations before any rebind or decryption.
-4. Decode strict bounded JSON and decrypt authenticated AES-GCM with request ID as AAD.
-5. Validate exact field IDs, string types, required values, checkbox vocabulary, typed formats and select membership.
-6. Recheck expiry and immutable private authority at the synchronous browser mutation boundary before each mutation/event and permitted auth action. For a cross-frame checkout, revalidate every owning Frame/document/origin/iframe host and its child guard before each child mutation and immediately before the one parent action dispatch. This is conservative two-phase validation, not a browser-level atomic transaction across OOPIFs.
-7. Terminalize once, write only safe status/phase receipts, scrub key/request/bindings and wake the original conversation with status-only context.
+```text
+attach exact target
+  -> receive a fresh session_ref
+  -> inventory generic controls
+  -> agent composes entry or action-approval request
+  -> owner submits encrypted payload
+  -> transport validates owner/session/request/crypto/expiry/replay
+  -> executor attempts each exact operation once
+  -> execution_complete
+  -> status-only wakeup
+  -> Goku inspects the live browser
+```
 
-Cancellation marks the session unusable before waiting for in-flight work to release its lock. Requests are invalidated on cancel, replacement, idle timeout and request deadline. The command `/handoffcancel` cancels the actual secure controller as well as connection tests. Operator browser tabs survive.
+Every action after `attach` is scoped by its returned `session_ref`. This allows
+independent flows in the same Telegram topic without replacing one another;
+the exact browser-target lease remains exclusive.
 
-## Privacy and unavoidable limits
+## Status meanings
 
-The dedicated tool's `read` result is status/origin only. Legacy ordinary `type`/`click` cannot mutate browser state. The plugin is not a sandbox against destination JavaScript, and ordinary input events may autosave or auto-submit. Plaintext briefly exists in the Mini App and gateway to perform the requested entry; strings/native browser memory cannot be guaranteed zeroized.
+### `attached`
 
-Static hosting uses no-store, no-referrer, nosniff, restrictive CSP and permissions policy. No analytics, storage, credential server or third-party credential broker is used. The hosting operator can change JavaScript; Telegram's SDK and the target provider remain trust boundaries. Self-hosting remains available.
+The controller holds the exact existing Chrome target. It says nothing about page content.
 
-## Evidence and limits
+### `inventory_available`
 
-See `docs/compatibility.md` for the field matrix, size limits and unsupported controls. Synthetic Python/Chromium/Mini App/Telegram-dispatch tests are separate from physical iPhone and live-provider verification. A passing fixture, emitted status or HTTP 200 never proves successful authentication or purchase.
+A generic inventory was captured and opaque refs were minted. It says nothing about which controls should be used.
+
+### `waiting_for_handoff`
+
+The Mini App request was published. It says nothing about Telegram rendering or callback delivery.
+
+### `execution_complete`
+
+The encrypted callback passed transport authorization, execution began, and every planned operation was attempted once.
+
+It does **not** mean:
+
+- fields were accepted;
+- site validation passed;
+- a provider request was sent;
+- authentication succeeded;
+- an action took effect;
+- a purchase completed.
+
+Mechanical browser exceptions may be summarized only as bounded counts and safe categories. They do not turn an accepted execution into a semantic webpage rejection.
+
+### `rejected`
+
+Reserved for failures before browser execution begins: wrong owner/chat/topic, wrong or stale session/request, invalid crypto or payload shape, expiry, replay, ambiguous target attachment, or unauthorized control reference.
+
+`rejected` is never a provider or webpage decision.
+
+## Entry execution
+
+The agent selects opaque editable-control refs from the latest inventory and supplies only public UI metadata plus a strategy:
+
+- `keyboard`
+- `fill`
+- `select`
+- `check`
+
+The plugin decrypts values only immediately before the matching browser call. It never returns or logs values and never reads them back to judge success. Entry execution never selects or clicks a submit, Continue, Sign In, Buy, or Pay control. Any applied keyboard, fill, selection, or check operation may activate destination handlers, including submission or navigation.
+
+An entry field may use an installed data-only component descriptor. Version 2.1 includes `segmented_code`, which is required, 4–12 characters long, and either digits-only or ASCII alphanumeric. One value may bind to one exact control or use explicit `split_chars` fan-out across exact inventoried refs. The plugin does not detect OTPs or choose the binding.
+
+An entry request may include a `secure-handoff.ui/1` view made from `stack`, `row`, `section`, `text`, `divider`, and `field` nodes. Every field must appear once. The plugin rewrites private refs to public field IDs. The view cannot contain actions, code, URLs, styles, hidden fields, or conditional behavior. Unknown schema versions or nodes reject before publication.
+
+The controller accepts at most 24 browser operations per entry request and gives each operation a 10-second timeout.
+
+## Consequential actions
+
+Actions use a separate `action_approval` request bound to one exact opaque action ref and one approval nonce. The owner must explicitly approve it in the Mini App. The capability is consumed before the click attempt and is never automatically retried.
+
+The receipt reports only mechanical completion. Provider outcome still requires live-browser inspection. Passkeys, MFA, CAPTCHA, and provider security prompts remain user-operated.
+
+## Privacy
+
+Public metadata may contain bounded labels, field types, strategies, installed component metadata, a versioned data-only layout, origins, and an agent-authored action summary. Visible strings reject control characters, Unicode format/invisible characters, bidirectional overrides, and URI schemes. Public metadata never contains browser selectors, HTML, current values, cookies, storage, tokens, ciphertext, private keys, or full URLs with query/fragment data.
+
+Receipts and wakeups contain only status, request kind, operation counts, safe error categories, origin, and routing metadata. Exception text and DOM text never enter them.

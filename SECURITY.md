@@ -1,113 +1,75 @@
-# Security policy
+# Security Policy
 
 ## Scope
 
-This project moves user-entered authentication, registrant, billing, and
-supported payment fields between a private Telegram bot chat and the operator's
-local Hermes browser profile. The Mini App is a transport boundary, not a
-general credential manager or payment processor.
+Protocol v4 transports owner-entered sensitive values from a Telegram Mini App into exact controls in the dedicated local Hermes Chrome profile. The plugin is a transport and mechanical executor, not a webpage policy engine.
 
-## Deployment boundary
+## Retained hard boundaries
 
-- General forms use encrypted fill-only entry. There is no inferred authorization
-  to click arbitrary submit, save, delete, or payment actions. Input events may
-  still cause destination-owned side effects; the destination origin must be trusted.
-- Ordinary tool results are status-only, not a DOM/body dump. All field entry
-  belongs in the encrypted Mini App; direct tool typing is not a secret channel.
-- Unsupported widgets fail closed. File selection, signatures, native wallets,
-  passkeys, CAPTCHA and 3DS need separately reviewed human-owned capabilities.
+- Exactly one configured positive Telegram owner ID.
+- Exact private chat and supplied-topic binding for callbacks. If Telegram omits the topic from a Web App service message, the request ID must resolve to exactly one live flow for that owner/private chat; zero or duplicate matches reject without browser execution.
+- HTTPS Mini App and browser origins.
+- Loopback-only HTTP CDP endpoint.
+- Existing-target attachment; no navigation by the secure-handoff tool.
+- Fresh RSA-2048 request key; AES-256-GCM submission with request ID as AAD; RSA-OAEP SHA-256 key wrapping.
+- Strict UTF-8 size, duplicate-key JSON, key-set, base64url, expiry, and replay validation in both the Mini App and backend.
+- Short-lived opaque per-flow session, snapshot, field, and action refs.
+- Request consumption before the first browser operation.
+- Separate one-time owner approval for an exact consequential action.
+- No plugin-selected submit following entry. Any applied input, selection, or check may activate destination handlers, including submission or navigation.
+- Secret and private-ref cleanup after completion, rejection, expiry, cancellation, replacement, or close.
+- Versioned `secure-handoff.ui/1` data-only views with exact key sets, node/depth/child bounds, total field coverage, and no request-supplied code or URLs.
+- Visible metadata rejects control characters, Unicode format/invisible characters, bidirectional overrides, and URI schemes.
+- At most 24 browser operations per entry request and a 10-second timeout per operation.
 
-- A single official HTTPS frontend deployment may serve every operator because
-  it is static and has no shared backend, bot token, account, or database.
-- The operator must choose whether to trust that shared frontend publisher. The
-  page can read what a user types before encrypting it for Hermes. Self-hosting
-  is the stronger isolation option and limits the impact of a compromised host.
-- Shared frontend hosting does **not** mean shared Telegram access. Each
-  operator needs one Telegram owner, one bot/gateway, one Hermes profile, and
-  one dedicated Chrome profile.
-- Keep Chrome DevTools Protocol on loopback (`http://127.0.0.1:9222` or another
-  loopback port). Remote and websocket CDP endpoints are rejected.
-- Enter the Telegram bot token only through Hermes's gateway setup. Never put
-  it in the Mini App, repository, chat, CLI arguments, or screenshots.
-- Never paste website credentials or one-time codes into Telegram chat, model
-  prompts, terminals, logs, receipts, screenshots, or issue reports.
-- Top-document and vetted HTTPS child-frame checkout fields are filled only after
-  an encrypted v3 request is accepted. Ordinary checkout remains fill-only. The
-  observed-action path permits one final click only after an owner-approved source
-  lease, runtime-issued facts, a fresh encrypted approval capability and synchronous
-  exact-state checks across the parent and every participating child frame. Child
-  ElementHandles never cross into a parent `page.evaluate`; each frame owns its
-  own private guard. A field-free boolean confirmation lacks bound transaction
-  terms; field fill never authorizes payment.
-- CAPTCHA, 3DS, MFA, passkeys, provider security screens, and payment outcomes remain user/provider-owned. The plugin never solves or bypasses them. An auth action ordinal is not a credential, MFA, passkey, or purchase approval.
-- The Mini App uses standard iOS `autocomplete` metadata, but Apple Passwords
-  and payment autofill remain scoped to the Mini App's own origin. A target
-  website origin cannot override that browser rule.
+These boundaries may reject before browser execution begins. They protect transport authority; they are not website-success judgments.
 
-## Composed ENTRY candidate
+## Removed webpage policy
 
-Composition exposes only opaque field refs, supported kind, required status and
-ordinal; frame-aware checkout refs also carry a bounded numeric frame ordinal.
-There are no current values or arbitrary destination text. The agent may select
-optional fields and arrange finite headings/layouts but cannot omit required
-fields, inject values, or grant a purchase click. Generic field/option labels
-are runtime-owned. Original private browser mutation order is independent of
-visual order. The launch fragment is public metadata; only submitted values
-are encrypted. No new relay or device pairing is introduced.
+The plugin does not:
 
-The local observed-action candidate connects actual trusted public-fact registries
-to ref-only controller tools, explicit Mini App acknowledgment, encrypted exact
-approval and one guarded click. A private local source issuer now joins explicitly
-selected source refs to composed entry; ordinary ENTRY does not imply purchase
-intent. The production issuer requires an encrypted owner source-selection
-approval for an exact retained public, nonpersonal product page. It publishes
-only fixed copy, exact HTTPS origin and runtime tab ordinal, with no entry values
-or page text. The owner must review the original browser page; ambiguous,
-private, billing and account sources must not be approved. A grant cannot
-certify privacy or financial truth or relax strict private/control exclusions. See [acquisition boundaries](docs/purchase-acquisition.md). See the [source trust boundary,
-API and limits](docs/observed-purchase-status.md). An exact match to arbitrary
-checkout text is not provenance. Trusted callers must exclude sensitive personal
-sources and known unsupported/contradictory obligations before publication.
+- classify auth, registration, billing, checkout, or provider stages;
+- infer field meaning from labels, autocomplete, routes, or forms;
+- observe mutation epochs or reject because a page rerendered;
+- read values back, call validity APIs, or decide whether a fill succeeded;
+- rediscover or infer a submit action;
+- inspect provider responses or declare authentication/payment success.
 
-The approval launch fragment is public metadata, not encrypted summary delivery.
-Only submitted approval is encrypted. Runtime-issued capabilities bind sealed
-facts, warning version and original action; the model cannot provide selectors,
-values or an approval. Scope mutation/input/change epochs and final private state
-are checked across all bound frames before consuming and clicking. There is no
-browser primitive for an atomic evaluate across OOPIFs, so the final parent
-dispatch has a deliberately short residual race window; a frame change detected
-before dispatch rejects, but the implementation does not claim mathematical
-atomicity. These checks do not certify merchant charges or legal completeness.
-Cancellation cannot undo a committed click. Synthetic integration is not a live
-deployment/security approval.
+After `execution_complete`, Goku inspects the exact live browser and discusses the observed state with Jacob. Mechanical browser exceptions are reported only as bounded counts and the safe categories `detached`, `timeout`, or `browser_error`.
 
-Cross-origin HTTPS child frames are treated as merchant-selected members of the
-top-page checkout trust boundary after exact iframe-host containment and frame
-identity validation; the Mini App intentionally does not display or independently
-ask the owner to approve each child origin. Deployments whose threat model does
-not trust embedded processors must add an owner-visible child-origin policy or
-disable cross-frame purchase authority. HTTPS and DOM containment alone are not a
-universal provider-authority proof.
+## Model-visible data
 
-The same private frame identity checks may be used for one visible HTTPS child
-frame containing native authentication controls. Auth action clicks are scoped to
-the owning child frame; generic Continue/Next/Submit actions remain fill-only
-unless the owner explicitly opts into one exact continuation on the attached
-target. That opt-in is consumed during binding and never grants purchase
-authority. Custom widgets, CAPTCHA, passkeys, MFA and provider challenges remain
-human-owned.
+Allowed:
 
-## Reporting
+- sanitized top/frame origins;
+- structural category and capabilities;
+- frame/control ordinal;
+- visible/enabled/editable booleans;
+- agent-authored public labels and action summary;
+- agent-authored bounded layout text and installed component metadata;
+- mechanical status and operation counts.
 
-Do not open a public issue for a suspected credential leak, authentication
-bypass, remote-CDP access issue, or Mini App transport flaw. After publication,
-use the repository owner's private security-report channel and include only a
-redacted reproduction. Until a public security contact is configured, contact
-the project maintainer privately through the distribution channel.
+Forbidden:
 
-## Release checks
+- field values, passwords, OTPs, card data, recovery phrases;
+- selectors, HTML, full URLs with query/fragment data;
+- cookies, storage, tokens, ciphertext, private keys;
+- raw exception text or webpage text in receipts/wakeups.
 
-Before publishing a release, run the full Python and frontend suites, the
-Hermes Plugin Doctor, `python -m build --sdist --wheel`, and the release artifact
-checker. Review the generated archive contents and run a secret scanner against
-the committed tree and Git history.
+## Agent-composed UI boundary
+
+The Mini App renders only installed nodes and controls with fixed DOM construction and CSS classes. It inserts display strings with `textContent`. Request data cannot add HTML, Markdown, scripts, styles, event handlers, URLs, network requests, navigation, storage, hidden fields, conditional behavior, or submit controls.
+
+Every entry field must appear exactly once in the optional view. The plugin converts private refs to generated field IDs before publication. Unknown schema versions, node kinds, component kinds, keys, refs, duplicates, and omissions reject before publication or before plaintext inputs mount.
+
+Visible-text and value limits count Unicode code points in both runtimes. Segmented-code fields preserve exact user input. They do not silently strip, truncate, or change case, and the Mini App does not request OTP autofill on its bridge origin. The frontend invalidates in-flight encryption on cancel, page hide, freeze, and expiry, rechecks freshness after each asynchronous boundary, and clears mounted plaintext and tracked byte buffers.
+
+Runtime executable extensions are not supported. A future extension loader would be a separate trust-boundary change and would need reproducible reviewed builds, pinned offline signing, a protected local allowlist, exact hash and version binding, revocation, and schema-checked public inputs. A signature alone would not make secret-handling code safe.
+
+## Consequential actions
+
+`present_action` binds one exact private action ref and publishes a fresh approval nonce. Approval is consumed before the click attempt and is never automatically retried. `execution_complete` remains outcome-unknown until live inspection. Passkeys, MFA, CAPTCHA, OS permission prompts, and provider security challenges remain user-operated.
+
+## Reporting vulnerabilities
+
+Do not include live credentials, tokens, cookies, Mini App payloads, or private browser data in an issue. Provide a synthetic reproduction using a disposable browser context.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed checks for source and built release artifacts."""
+"""Strict source and built release-artifact checks."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
-VERSION = "1.1.0"
+VERSION = "2.1.0"
 REQUIRED_SDIST = {
     "plugin.yaml",
     "LICENSE",

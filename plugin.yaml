@@ -1,15 +1,15 @@
 name: telegram-secure-handoff
-version: 1.1.0
+version: 2.1.0
 manifest_version: 1
 api_version: 1
 kind: standalone
 description: >
-  Owner-scoped encrypted Telegram Mini App handoff that lets Hermes continue
-  authenticated browser and checkout work in its dedicated local Chromium profile.
+  Transport-only encrypted Telegram Mini App bridge that applies agent-selected
+  operations to exact controls in the dedicated local Hermes Chrome profile.
 author: Hermes Secure Handoff Telegram contributors
 license: MIT
 python_dependencies:
-  - "cryptography>=42,<48"
+  - "cryptography>=42,<51"
   - "playwright>=1.58,<2"
   - "python-telegram-bot>=21,<23"
 config_schema:

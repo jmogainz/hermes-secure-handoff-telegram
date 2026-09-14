@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-telegram-secure-handoff"
-version = "1.1.0"
-description = "Owner-scoped encrypted Telegram Mini App handoff for Hermes"
+version = "2.1.0"
+description = "Transport-only encrypted Telegram Mini App browser executor for Hermes"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Hermes Secure Handoff Telegram contributors" }]
-keywords = ["hermes", "telegram", "secure-handoff", "browser", "checkout", "mini-app"]
+keywords = ["hermes", "telegram", "secure-handoff", "browser", "executor", "mini-app"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
@@ -22,7 +22,7 @@ classifiers = [
   "Topic :: Internet :: WWW/HTTP :: Browsers",
 ]
 dependencies = [
-  "cryptography>=42,<48",
+  "cryptography>=42,<51",
   "playwright>=1.58,<2",
   "python-telegram-bot>=21,<23",
 ]
