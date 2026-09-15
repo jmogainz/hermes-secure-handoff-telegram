@@ -72,7 +72,13 @@ hermes plugins enable telegram-secure-handoff
 hermes gateway restart
 ```
 
-Configure exactly one Telegram owner ID, the HTTPS Mini App URL, and the local loopback CDP endpoint. The default CDP endpoint is `http://127.0.0.1:9222`.
+For a GitHub install, use:
+
+```bash
+hermes plugins install jmogainz/hermes-secure-handoff-telegram --enable
+```
+
+The shared Mini App is `https://hermessecurehandoff.xyz`. Configure exactly one Telegram owner ID. Self-hosted Mini App URLs can still be supplied as an override.
 
 ## Development smoke
 

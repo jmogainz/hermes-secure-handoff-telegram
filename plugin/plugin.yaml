@@ -16,7 +16,7 @@ config_schema:
   mini_app_url:
     type: str
     required: false
-    default: "https://hermes-secure-handoff-telegram.vercel.app"
+    default: "https://hermessecurehandoff.xyz"
     description: "HTTPS origin hosting the Telegram Mini App; the official shared URL is the default"
   allowed_user_ids:
     type: list

@@ -7,7 +7,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
-DEFAULT_MINI_APP_URL = "https://hermes-secure-handoff-telegram.vercel.app"
+DEFAULT_MINI_APP_URL = "https://hermessecurehandoff.xyz"
 
 
 def validate_browser_cdp_url(raw: Any) -> Optional[str]:
