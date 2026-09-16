@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-telegram-secure-handoff"
-version = "2.1.0"
+version = "2.2.0"
 description = "Transport-only encrypted Telegram Mini App browser executor for Hermes"
 readme = "README.md"
 requires-python = ">=3.11"

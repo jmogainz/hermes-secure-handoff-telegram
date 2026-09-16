@@ -27,6 +27,19 @@ Strategies:
 - `check` — explicit true/false checked state;
 - `click` — action approval only.
 
+## Group-origin flows
+
+- A flow may be attached from an authorized group chat or forum topic.
+- The encrypted Mini App entry is always published to the owner's private chat, and
+  submissions are accepted only from the owner's private chat; Telegram permits `web_app`
+  buttons and `web_app_data` callbacks only in private chats, so a fully in-group Mini App
+  round trip does not exist at the platform level.
+- Completion wakeups carry the origin chat type and routable topic so Goku resumes the
+  originating conversation.
+- `/handoffcancel` in the origin group (owner-only, addressed to the bot) cancels only the
+  exact recorded origin scope; non-owner group members cannot start, complete, or cancel a
+  handoff.
+
 ## Deliberate non-guarantees
 
 No deterministic executor can prove compatibility with every custom widget, virtualized control, canvas UI, shadow-DOM component, provider event model, or mid-execution rerender. Protocol v4 handles that uncertainty by refusing to make a webpage verdict: it finishes the mechanical attempt, wakes Goku, and requires live inspection.

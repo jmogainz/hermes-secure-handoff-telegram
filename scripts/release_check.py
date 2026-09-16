@@ -13,7 +13,7 @@ from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 REQUIRED_SDIST = {
     "plugin.yaml",
     "LICENSE",

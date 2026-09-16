@@ -4,7 +4,7 @@
 
 Protocol v4 is an owner-scoped encrypted transport plus a generic browser executor. Browser interpretation is deliberately outside the protocol.
 
-Telegram callbacks normally must match the publishing owner, private chat, and topic exactly. Telegram may omit the topic ID from a Web App service message. In that case, the request ID must resolve to exactly one live flow for the same owner and private chat; zero or duplicate matches reject without consuming or executing any flow.
+Telegram callbacks must match the publishing owner and the exact private handoff chat. A flow may be attached from an authorized group chat or forum topic: the encrypted entry is still published to, and submissions are still accepted only from, the owner's private chat; the recorded origin (chat, chat type, and routable topic) is used only for completion wakeups and exact cancellation. Telegram may omit the topic ID from a Web App service message. In that case, the request ID must resolve to exactly one live flow for the same owner and private chat; zero or duplicate matches reject without consuming or executing any flow.
 
 ## Tool actions
 

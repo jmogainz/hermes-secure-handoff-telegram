@@ -1,7 +1,7 @@
 {
   "name": "hermes-telegram-secure-handoff-web",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Transport-only encrypted Telegram Mini App browser executor",
   "engines": {
     "node": ">=20"

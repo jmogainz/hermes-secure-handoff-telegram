@@ -1,5 +1,5 @@
 name: telegram-secure-handoff
-version: 2.1.0
+version: 2.2.0
 manifest_version: 1
 api_version: 1
 kind: standalone

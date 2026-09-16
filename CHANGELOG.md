@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.0 — group-origin flows
+
+- `attach`, `inventory`, `present_entry`, `present_action`, `read`, and `close` now accept authorized group-chat and forum-topic origins.
+- The encrypted launch keyboard and every accepted submission remain bound to the owner's private chat; the Mini App is never published inside a group (Telegram permits `web_app` buttons and `web_app_data` callbacks only in private chats).
+- Completion wakeups carry the recorded origin chat type (DM, group, or forum-topic routing) so the wake resumes the originating conversation instead of a parallel session.
+- `/handoffcancel` works from the origin group (owner-only, exact chat/topic match) and stays silent when no flow matches; cancellation mirrors the Telegram adapter's routable-thread rules, including forum General-topic normalization.
+- New transport tests cover group-origin publication, owner-DM submission acceptance and refusals, wake routing, and exact-scope cancellation.
+
 ## 2.1.0 — agent-composed component views
 
 - Added a safe component registry with a required 4–12 character `segmented_code` control.

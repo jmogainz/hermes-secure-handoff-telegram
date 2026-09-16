@@ -11,7 +11,8 @@ The plugin is a **transport and mechanical executor**. It is not a webpage inter
 The plugin owns only:
 
 - encrypted Mini App requests and submissions;
-- exact Telegram owner and private-chat binding, plus exact topic binding when Telegram supplies it; a topicless Web App service callback is routed by a unique request ID within that owner/chat scope;
+- exact Telegram owner and private-handoff-chat binding; flows may originate from an authorized group chat or forum topic, but entry and submissions stay bound to the owner's private chat, and the recorded origin is used only for wakeups and exact cancellation;
+- exact topic binding when Telegram supplies it; a topicless Web App service callback is routed by a unique request ID within that owner/private-chat scope;
 - request expiry, one-time use, and replay protection;
 - exact attachment to one existing HTTPS Chrome target and a unique per-flow `session_ref`;
 - short-lived opaque control refs produced by generic inventory;
@@ -49,6 +50,10 @@ attach exact target
 Every action after `attach` is scoped by its returned `session_ref`. This allows
 independent flows in the same Telegram topic without replacing one another;
 the exact browser-target lease remains exclusive.
+
+Flows attached from a group chat or forum topic keep the same submission scope:
+the launch keyboard and the encrypted callback stay in the owner's private chat,
+while the completion wakeup returns to the origin chat.
 
 ## Status meanings
 

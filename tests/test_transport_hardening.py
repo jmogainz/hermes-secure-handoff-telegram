@@ -188,3 +188,49 @@ def test_mini_app_validators_reject_controls_and_zero_port(raw, validator):
     else:
         with pytest.raises(ValueError):
             cli._validate_mini_app_url(raw)
+
+
+def group_update(thread=None, chat_id=-100123):
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=7),
+        effective_chat=SimpleNamespace(id=chat_id, type="group"),
+        effective_message=SimpleNamespace(message_thread_id=thread),
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_cancel_stays_silent_when_nothing_is_cancelled(tmp_path):
+    p = make_plugin(tmp_path)
+    sent = []
+
+    async def send_message(**kwargs):
+        sent.append(kwargs)
+
+    async def not_cancelled(update):
+        return False
+
+    p.secure_controller = SimpleNamespace(cancel_from_update=not_cancelled)
+    await p.handle_handoffcancel(group_update(), SimpleNamespace(bot=SimpleNamespace(send_message=send_message)))
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_group_cancel_reports_only_a_real_secure_cancellation(tmp_path):
+    p = make_plugin(tmp_path)
+    sent = []
+
+    async def send_message(**kwargs):
+        sent.append(kwargs)
+
+    async def cancelled(update):
+        return True
+
+    p.secure_controller = SimpleNamespace(cancel_from_update=cancelled)
+    with pytest.raises(ApplicationHandlerStop):
+        await p.handle_handoffcancel(
+            group_update(thread=9), SimpleNamespace(bot=SimpleNamespace(send_message=send_message)),
+        )
+    assert sent[0]["chat_id"] == -100123
+    assert sent[0]["message_thread_id"] == 9
+    assert sent[0]["text"] == "Secure handoff cancelled."
+    assert "reply_markup" not in sent[0]

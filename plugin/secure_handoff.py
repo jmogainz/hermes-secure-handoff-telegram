@@ -86,6 +86,7 @@ class Session:
     user: int
     chat: int
     thread: int | None
+    chat_type: str = "dm"
     page: Any = field(default=None, repr=False)
     context: Any = field(default=None, repr=False)
     wake: asyncio.Event | None = field(default=None, repr=False)
@@ -137,6 +138,12 @@ class SecureHandoffController:
         self._admission_lock = asyncio.Lock()
 
     def _identity(self):
+        """Owner/chat/thread/chat-type tuple for the current tool-call session.
+
+        Group and forum origins are accepted; the chat-id sign is checked against the
+        chat type so a mislabeled or missing chat type fails closed instead of
+        authorizing the wrong scope.
+        """
         try:
             from gateway.session_context import get_session_env
 
@@ -145,20 +152,48 @@ class SecureHandoffController:
                 for key in (
                     "HERMES_SESSION_PLATFORM", "HERMES_SESSION_USER_ID",
                     "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_THREAD_ID",
+                    "HERMES_SESSION_CHAT_TYPE",
                 )
             ]
             if values[0] != "telegram" or not values[1] or not values[2]:
                 return None
-            return (
-                int(values[1]),
-                int(values[2]),
-                int(values[3]) if values[3] else None,
-            )
+            user_id = int(values[1])
+            chat_id = int(values[2])
+            if chat_id == 0:
+                return None
+            thread = int(values[3]) if values[3] else None
+            chat_type = (values[4] or "").strip().lower()
+            if not chat_type and chat_id > 0:
+                chat_type = "dm"
+            if chat_type not in {"dm", "group", "forum"}:
+                return None
+            if (chat_type == "dm") != (chat_id > 0):
+                return None
+            if thread is not None and thread <= 0:
+                return None
+            return (user_id, chat_id, thread, chat_type)
         except Exception:
             return None
 
     def _owners(self) -> set[int]:
         return set(self.config.allowed_user_ids) if self.config is not None else set()
+
+    @staticmethod
+    def _origin_of(session: "Session"):
+        return (session.user, session.chat, session.thread, session.chat_type)
+
+    @staticmethod
+    def _handoff_target(session: "Session"):
+        """The private chat that receives the launch keyboard and whose callback is authorized.
+
+        DM-origin flows publish to and submit from the same chat as the origin.
+        Group-origin flows always publish to, and accept submissions only from, the
+        owner's private chat; the origin chat stays recorded for wakeups and
+        cancellation.
+        """
+        if session.chat_type == "dm":
+            return session.chat, session.thread
+        return session.user, None
 
     def _configured_cdp_url(self) -> str:
         try:
@@ -237,7 +272,7 @@ class SecureHandoffController:
         if not isinstance(session_ref, str) or _SESSION_REF_RE.fullmatch(session_ref) is None:
             return None
         session = self.sessions.get(session_ref)
-        if session is None or (session.user, session.chat, session.thread) != ident:
+        if session is None or self._origin_of(session) != ident:
             return None
         return session
 
@@ -380,7 +415,8 @@ class SecureHandoffController:
                 [[KeyboardButton("Open secure handoff", web_app=WebAppInfo(url=launch))]],
                 resize_keyboard=True,
             )
-            return await self._send(SimpleNamespace(bot=self.bot), session.chat, session.thread, text, markup)
+            handoff_chat, handoff_thread = self._handoff_target(session)
+            return await self._send(SimpleNamespace(bot=self.bot), handoff_chat, handoff_thread, text, markup)
         except Exception:
             return False
 
@@ -800,14 +836,15 @@ class SecureHandoffController:
         return user_id, chat_id, thread
 
     def _callback_scope_matches(self, session: Session, identity) -> bool:
-        """Match owner/chat and any supplied topic for the request-selected flow."""
+        """Match the owner and the exact private handoff chat (and any supplied topic)."""
         if identity is None:
             return False
         user, chat, thread = identity
-        if (user, chat) != (session.user, session.chat):
+        handoff_chat, handoff_thread = self._handoff_target(session)
+        if (user, chat) != (session.user, handoff_chat):
             return False
         # A topicless Web App callback is correlated by its unique request ID.
-        return thread is None or thread == session.thread
+        return thread is None or thread == handoff_thread
 
     @staticmethod
     def _safe_send_reason(error: Exception | None) -> str:
@@ -877,19 +914,21 @@ class SecureHandoffController:
                     session.user,
                     session.chat,
                     session.thread,
+                    session.chat_type,
                     immutable_origin,
                 )
             )
         except Exception:
             pass
 
-    async def _wake_session(self, status, user, chat, thread, origin) -> None:
+    async def _wake_session(self, status, user, chat, thread, chat_type, origin) -> None:
         if status != "execution_complete" or self.adapter is None:
             return
         source = SimpleNamespace(
             chat_id=str(chat),
             user_id=str(user),
             thread_id=str(thread) if thread is not None else None,
+            chat_type=str(chat_type or "dm"),
         )
         try:
             await self._deliver_wake(self.adapter, self._wake_text(status, origin), source)
@@ -907,21 +946,54 @@ class SecureHandoffController:
         real_source = SessionSource(
             platform=Platform.TELEGRAM,
             chat_id=str(source.chat_id),
-            chat_type="dm",
+            chat_type=str(getattr(source, "chat_type", None) or "dm"),
             user_id=str(source.user_id) if source.user_id else None,
             thread_id=str(source.thread_id) if source.thread_id is not None else None,
         )
         await deliver_wake(adapter, text=text, source=real_source)
 
+    def _origin_identity(self, update: Any):
+        """Owner-scoped origin identity (DM, group, or forum topic) from a command update.
+
+        Mirrors the Telegram adapter's routable-thread rules so the value matches the
+        session vars captured when the flow was attached; anything ambiguous fails
+        closed.
+        """
+        user = getattr(update, "effective_user", None)
+        chat = getattr(update, "effective_chat", None)
+        user_id = getattr(user, "id", None)
+        chat_id = getattr(chat, "id", None)
+        if type(user_id) is not int or type(chat_id) is not int or user_id not in self._owners():
+            return None
+        raw_chat_type = getattr(chat, "type", None)
+        chat_type = str(getattr(raw_chat_type, "value", raw_chat_type) or "").strip().lower()
+        if chat_type == "private":
+            kind, is_group = "dm", False
+        elif chat_type in {"group", "supergroup"}:
+            kind, is_group = "group", True
+        else:
+            return None
+        message = getattr(update, "effective_message", None)
+        raw_thread = getattr(message, "message_thread_id", None)
+        is_forum = is_group and getattr(chat, "is_forum", False) is True
+        thread = None
+        if raw_thread is not None:
+            is_topic = bool(getattr(message, "is_topic_message", False))
+            if (is_forum or is_topic) and type(raw_thread) is int and raw_thread > 0:
+                thread = raw_thread
+        elif is_forum:
+            thread = 1
+        return (user_id, chat_id, thread, kind)
+
     async def cancel_from_update(self, update: Any) -> bool:
-        identity = self._authorized(update)
+        identity = self._origin_identity(update)
         if identity is None:
             return False
         cancelled = False
         async with self._admission_lock:
             sessions = [
                 session for session in self.sessions.values()
-                if (session.user, session.chat, session.thread) == identity
+                if self._origin_of(session) == identity
             ]
             for session in sessions:
                 async with session.lock:
@@ -1008,11 +1080,13 @@ class SecureHandoffController:
             return '{"status":"invalid"}'
         if (
             ident is None
-            or len(ident) != 3
+            or len(ident) != 4
             or type(ident[0]) is not int
             or type(ident[1]) is not int
             or ident[0] <= 0
-            or ident[1] <= 0
+            or ident[1] == 0
+            or ident[3] not in {"dm", "group", "forum"}
+            or (ident[3] == "dm") != (ident[1] > 0)
             or ident[0] not in self._owners()
             or (ident[2] is not None and (type(ident[2]) is not int or ident[2] <= 0))
         ):

@@ -7,7 +7,9 @@ Protocol v4 transports owner-entered sensitive values from a Telegram Mini App i
 ## Retained hard boundaries
 
 - Exactly one configured positive Telegram owner ID.
-- Exact private chat and supplied-topic binding for callbacks. If Telegram omits the topic from a Web App service message, the request ID must resolve to exactly one live flow for that owner/private chat; zero or duplicate matches reject without browser execution.
+- Exact owner and private-chat binding for callbacks. Flows may originate from an authorized group chat or forum topic, but the encrypted entry is always published to, and submissions are accepted only from, the owner's private chat; the recorded origin is used only for wakeups and exact cancellation and never authorizes a submission.
+- If Telegram omits the topic from a Web App service message, the request ID must resolve to exactly one live flow for that owner/private chat; zero or duplicate matches reject without browser execution.
+- Group-context cancellation (`/handoffcancel` in an authorized group or forum topic) matches only the exact owner and origin chat/topic recorded at attach time.
 - HTTPS Mini App and browser origins.
 - Loopback-only HTTP CDP endpoint.
 - Existing-target attachment; no navigation by the secure-handoff tool.

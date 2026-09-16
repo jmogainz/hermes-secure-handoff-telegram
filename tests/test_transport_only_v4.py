@@ -16,7 +16,8 @@ from plugin.protocol_v4 import make_entry_request
 from plugin.secure_handoff import SCHEMA, SecureHandoffController, Session
 
 
-IDENT = (7, 8, 42)
+IDENT = (7, 8, 42, "dm")
+GROUP_IDENT = (7, -1001234567890, None, "group")
 ORIGIN = "https://fixture.example"
 TARGET_ID = "A" * 32
 SESSION_REF = "ss_" + "S" * 32
@@ -174,7 +175,7 @@ def envelope(session, body, *, aad=None):
 
 
 def update(raw, identity=IDENT):
-    user, chat, thread = identity
+    user, chat, thread, *_ = identity
     return SimpleNamespace(
         effective_user=SimpleNamespace(id=user),
         effective_chat=SimpleNamespace(id=chat, type="private"),
@@ -213,7 +214,7 @@ async def callback(c, session, body, *, identity=IDENT, raw=None):
         await c._web_data(update(raw, identity), SimpleNamespace(bot=c.bot))
     return await c._run(
         "read", {"session_ref": session.session_ref},
-        (session.user, session.chat, session.thread),
+        (session.user, session.chat, session.thread, session.chat_type),
     )
 
 
@@ -837,3 +838,225 @@ async def test_execution_ack_and_receipt_contain_only_mechanical_evidence(tmp_pa
     assert receipt["v"] == 4
     assert set(receipt) <= {"v", "id", "status", "thread", "time"} | (SAFE_RECEIPT_KEYS - {"status"})
     assert "PRIVATE" not in json.dumps(receipt) and "synthetic" not in json.dumps(receipt)
+
+
+# ---- group-origin flows ----
+
+
+def test_public_tool_accepts_group_origin_identity(tmp_path, monkeypatch):
+    c = controller(tmp_path)
+    monkeypatch.setattr(c, "_identity", lambda: GROUP_IDENT)
+
+    def fake_submit(coroutine):
+        coroutine.close()
+        return {"status": "forwarded"}
+
+    monkeypatch.setattr(c, "_submit", fake_submit)
+    assert json.loads(c.tool({"action": "read", "session_ref": SESSION_REF})) == {"status": "forwarded"}
+
+
+def test_public_tool_rejects_channel_and_inconsistent_chat_types(tmp_path, monkeypatch):
+    c = controller(tmp_path)
+
+    def fake_submit(coroutine):
+        coroutine.close()
+        return {"status": "forwarded"}
+
+    monkeypatch.setattr(c, "_submit", fake_submit)
+    for ident in ((7, -100123, None, "channel"), (7, -100123, None, "dm"), (7, 8, None, "group")):
+        monkeypatch.setattr(c, "_identity", lambda ident=ident: ident)
+        assert json.loads(c.tool({"action": "read", "session_ref": SESSION_REF})) == {"status": "rejected"}
+
+
+def test_identity_reads_chat_type_from_session_vars(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    values = {
+        "HERMES_SESSION_PLATFORM": "telegram",
+        "HERMES_SESSION_USER_ID": "7",
+        "HERMES_SESSION_CHAT_ID": "-100123",
+        "HERMES_SESSION_THREAD_ID": "",
+        "HERMES_SESSION_CHAT_TYPE": "group",
+    }
+    gateway = types.ModuleType("gateway")
+    gateway.__path__ = []
+    session_context = types.ModuleType("gateway.session_context")
+    session_context.get_session_env = lambda key, default="": values.get(key, default)
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
+
+    c = controller(tmp_path)
+    assert c._identity() == (7, -100123, None, "group")
+
+    values["HERMES_SESSION_CHAT_TYPE"] = ""  # negative chat without a type fails closed
+    assert c._identity() is None
+    values["HERMES_SESSION_CHAT_ID"] = "8"  # legacy DM runtimes keep working
+    assert c._identity() == (7, 8, None, "dm")
+    values["HERMES_SESSION_CHAT_TYPE"] = "group"  # positive chat + group type fails closed
+    assert c._identity() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ident,expected_chat,expected_thread", [
+    (IDENT, 8, 42),
+    (GROUP_IDENT, 7, None),
+])
+async def test_presentation_targets_the_private_handoff_chat(tmp_path, ident, expected_chat, expected_thread):
+    c = controller(tmp_path)
+    session = attached(c, ident=ident)
+    session.inventory_refs = {FIELD_REF: Control("top")}
+    session.control_refs = session.inventory_refs
+    session.inventory_meta = {FIELD_REF: {"capabilities": ["keyboard"], "category": "editable"}}
+
+    result = await c._run("present_entry", {
+        "action": "present_entry", "session_ref": session.session_ref,
+        "snapshot_ref": SNAPSHOT_REF,
+        "fields": [{
+            "ref": FIELD_REF, "label": "Account", "type": "text",
+            "required": True, "strategy": "keyboard",
+        }],
+    }, ident)
+
+    assert result == {"status": "waiting_for_handoff"}
+    assert session.status == "waiting_for_handoff"
+    assert c.bot.sent[-1]["chat_id"] == expected_chat
+    if expected_thread is None:
+        assert "message_thread_id" not in c.bot.sent[-1]
+    else:
+        assert c.bot.sent[-1]["message_thread_id"] == expected_thread
+
+
+@pytest.mark.asyncio
+async def test_group_origin_submission_from_the_owner_dm_executes(tmp_path):
+    c = controller(tmp_path)
+    session, top, child = seed_entry(c, ident=GROUP_IDENT)
+    result = await callback(
+        c, session, {"values": {"f0": "synthetic-a", "f1": "synthetic-b"}},
+        identity=(IDENT[0], IDENT[0], None),
+    )
+    assert len(top.calls) == len(child.calls) == 1
+    assert_mechanical(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", [(7, 8, None), (7, 7, 42), (9, 7, None)])
+async def test_group_origin_submission_wrong_scope_rejects_before_browser_operations(tmp_path, identity):
+    c = controller(tmp_path)
+    session, top, child = seed_entry(c, ident=GROUP_IDENT)
+    result = await callback(c, session, {"values": {"f0": "synthetic-a", "f1": "synthetic-b"}}, identity=identity)
+    assert top.calls == child.calls == []
+    assert result["status"] == "waiting_for_handoff"
+
+
+@pytest.mark.asyncio
+async def test_dm_origin_submission_from_a_group_context_still_rejects(tmp_path):
+    c = controller(tmp_path)
+    session, top, child = seed_entry(c)
+    inbound = update(envelope(session, {"values": {"f0": "x", "f1": "y"}}), (IDENT[0], GROUP_IDENT[1], None))
+    inbound.effective_chat.type = "group"
+    with pytest.raises(ApplicationHandlerStop):
+        await c._web_data(inbound, SimpleNamespace(bot=c.bot))
+    assert top.calls == child.calls == []
+    assert session.status == "waiting_for_handoff"
+
+
+@pytest.mark.asyncio
+async def test_wake_delivery_carries_the_origin_chat_type(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    captured = []
+
+    async def fake_deliver_wake(adapter, *, text, session_id="", source=None):
+        captured.append(source)
+
+    gateway = types.ModuleType("gateway")
+    gateway.__path__ = []
+    config = types.ModuleType("gateway.config")
+    config.Platform = SimpleNamespace(TELEGRAM="telegram")
+    session_module = types.ModuleType("gateway.session")
+
+    class FakeSource:
+        def __init__(self, platform=None, chat_id="", chat_type="dm", user_id=None, user_name=None, thread_id=None):
+            self.platform = platform
+            self.chat_id = chat_id
+            self.chat_type = chat_type
+            self.user_id = user_id
+            self.thread_id = thread_id
+
+    session_module.SessionSource = FakeSource
+    wake_module = types.ModuleType("gateway.wake")
+    wake_module.deliver_wake = fake_deliver_wake
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.config", config)
+    monkeypatch.setitem(sys.modules, "gateway.session", session_module)
+    monkeypatch.setitem(sys.modules, "gateway.wake", wake_module)
+
+    c = controller(tmp_path)
+    await c._deliver_wake(object(), "text", SimpleNamespace(
+        chat_id=str(GROUP_IDENT[1]), user_id=str(GROUP_IDENT[0]), thread_id=None, chat_type="group"))
+    await c._deliver_wake(object(), "text", SimpleNamespace(
+        chat_id=str(IDENT[1]), user_id=str(IDENT[0]), thread_id=str(IDENT[2]), chat_type="dm"))
+
+    assert [(source.chat_type, source.chat_id, source.user_id, source.thread_id) for source in captured] == [
+        ("group", str(GROUP_IDENT[1]), "7", None),
+        ("dm", "8", "7", "42"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wake_session_passes_the_recorded_chat_type(tmp_path):
+    c = controller(tmp_path)
+    captured = []
+
+    async def fake_deliver(*args, **_kwargs):
+        captured.append(args)
+
+    c._deliver_wake = fake_deliver
+    await c._wake_session("execution_complete", 7, GROUP_IDENT[1], None, "group", ORIGIN)
+
+    assert len(captured) == 1
+    _adapter, _text, source = captured[0]
+    assert (source.chat_type, source.chat_id, source.thread_id) == ("group", str(GROUP_IDENT[1]), None)
+
+
+@pytest.mark.asyncio
+async def test_cancel_from_update_matches_the_exact_origin_scope(tmp_path):
+    c = controller(tmp_path)
+    group_session = attached(c, session_ref="ss_" + "G" * 32, ident=GROUP_IDENT)
+    dm_session = attached(c, session_ref="ss_" + "D" * 32, ident=IDENT)
+    forum_session = attached(c, session_ref="ss_" + "F" * 32, ident=(7, -1009999, 5, "group"))
+    general_session = attached(c, session_ref="ss_" + "H" * 32, ident=(7, -1009999, 1, "group"))
+
+    def group_update(chat_id, thread, *, is_forum=False, user=7, chat_kind="group"):
+        return SimpleNamespace(
+            effective_user=SimpleNamespace(id=user),
+            effective_chat=SimpleNamespace(id=chat_id, type=chat_kind, is_forum=is_forum),
+            effective_message=SimpleNamespace(message_thread_id=thread),
+        )
+
+    dm_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7),
+        effective_chat=SimpleNamespace(id=IDENT[1], type="private"),
+        effective_message=SimpleNamespace(message_thread_id=IDENT[2], is_topic_message=True),
+    )
+    # A DM update cancels only the DM-origin flow, never the group-origin flow.
+    assert await c.cancel_from_update(dm_update) is True
+    assert dm_session.session_ref not in c.sessions
+    assert group_session.session_ref in c.sessions
+
+    # Wrong chat, wrong user, and wrong topic all fail closed.
+    assert await c.cancel_from_update(group_update(-1001234567, None)) is False
+    assert await c.cancel_from_update(group_update(GROUP_IDENT[1], None, user=9)) is False
+    assert await c.cancel_from_update(group_update(-1009999, 6, is_forum=True, chat_kind="supergroup")) is False
+
+    # The exact group origin cancels the matching flow only.
+    assert await c.cancel_from_update(group_update(GROUP_IDENT[1], None)) is True
+    assert group_session.session_ref not in c.sessions
+
+    # Exact forum-topic and General-topic origins match their recorded threads.
+    assert await c.cancel_from_update(group_update(-1009999, 5, is_forum=True, chat_kind="supergroup")) is True
+    assert forum_session.session_ref not in c.sessions
+    assert await c.cancel_from_update(group_update(-1009999, None, is_forum=True, chat_kind="supergroup")) is True
+    assert general_session.session_ref not in c.sessions

@@ -31,6 +31,16 @@ uses that ref, so multiple independent flows may share the same owner/chat/topic
 while remaining isolated to their exact browser targets. A target can still be
 attached to only one flow at a time.
 
+## Group chats
+
+A flow may originate from an authorized group chat or forum topic. Telegram permits
+`web_app` buttons and `web_app_data` callbacks only in private chats, so the
+encrypted entry is always published to — and submissions are accepted only from —
+the owner's private chat. The completion wakeup returns to the origin chat, and
+`/handoffcancel` in the origin chat (addressed to the bot in groups) cancels only
+the exact recorded origin scope. Non-owner group members cannot start, complete,
+or cancel a handoff.
+
 The former auth/form/checkout classifiers, mutation epochs, stage machine, action rediscovery, purchase observer, and webpage-success statuses have been removed.
 
 ## Status contract
@@ -50,7 +60,7 @@ The Mini App does not run request-supplied HTML, JavaScript, CSS, URLs, event ha
 Retained:
 
 - AES-256-GCM payload encryption with RSA-OAEP-SHA-256 key wrapping;
-- exact Telegram owner/private-chat/topic binding;
+- exact Telegram owner and private-handoff-chat binding; group-origin flows stay bound to the owner's private chat for entry and submissions;
 - expiry and one-time request consumption;
 - loopback-only Chrome CDP connection;
 - exact existing HTTPS target attachment;

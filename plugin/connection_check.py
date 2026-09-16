@@ -760,23 +760,40 @@ class TelegramSecureHandoffPlugin:
 
     async def handle_handoffcancel(self, update: Any, context: Any) -> None:
         identity = self._authorized_command_identity(update)
-        if identity is None:
-            return
-        sender_id, chat_id = identity
         message = getattr(update, "effective_message", None)
         current_thread = _thread_from_message(message)
-        with self._lock:
-            active_id = self._active_by_user.get(sender_id)
-            active = self._pending.get(active_id) if active_id else None
-            request = self.cancel(sender_id) if active is not None and self._is_matching_origin(active, update) else None
         secure_cancelled = False
         if self.secure_controller is not None:
             try:
                 # The controller independently validates its session's exact
-                # owner/private-chat/thread binding before cancelling it.
+                # owner/origin-chat scope (DM or authorized group topic) before
+                # cancelling a flow.
                 secure_cancelled = await self.secure_controller.cancel_from_update(update) is True
             except Exception:
                 pass  # Cancellation errors must not become model input.
+        if identity is None:
+            # Group-context command: only a secure-handoff flow bound to this
+            # exact chat/topic is cancellable; stay silent when there is nothing
+            # to cancel.
+            chat = getattr(update, "effective_chat", None)
+            chat_id = _safe_int(getattr(chat, "id", None))
+            raw_chat_type = getattr(chat, "type", None)
+            chat_type = str(getattr(raw_chat_type, "value", raw_chat_type) or "").strip().lower()
+            if chat_id is None or chat_type not in {"group", "supergroup"} or not secure_cancelled:
+                return
+            await self._send(
+                context,
+                chat_id=chat_id,
+                thread_id=current_thread,
+                text="Secure handoff cancelled.",
+            )
+            self._raise_stop()
+            return
+        sender_id, chat_id = identity
+        with self._lock:
+            active_id = self._active_by_user.get(sender_id)
+            active = self._pending.get(active_id) if active_id else None
+            request = self.cancel(sender_id) if active is not None and self._is_matching_origin(active, update) else None
         target_thread = request.origin_thread if request is not None and request.chat_id == chat_id else current_thread
         await self._send(
             context,
@@ -815,6 +832,9 @@ class TelegramSecureHandoffPlugin:
         owner_scope = filters.ChatType.PRIVATE & filters.User(
             user_id=self.config.allowed_user_ids,
         )
+        cancel_scope = (filters.ChatType.PRIVATE | filters.ChatType.GROUPS) & filters.User(
+            user_id=self.config.allowed_user_ids,
+        )
         application.add_handler(
             CommandHandler(
                 "handoffcheck",
@@ -828,7 +848,7 @@ class TelegramSecureHandoffPlugin:
             CommandHandler(
                 "handoffcancel",
                 self.handle_handoffcancel,
-                filters=owner_scope,
+                filters=cancel_scope,
                 block=True,
             ),
             group=PLUGIN_HANDLER_GROUP,
